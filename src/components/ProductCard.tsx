@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ExternalLink, Copy, Check, Tag } from 'lucide-react';
 import { useLanguage } from '@/i18n/LanguageContext';
-import type { Product } from '@/data/mockProducts';
+import type { Product } from '@/lib/api';
 
 interface ProductCardProps {
   product: Product;
