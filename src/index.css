@@ -72,39 +72,40 @@
 @layer components {
   .glow-border {
     @apply border border-border;
-    box-shadow: 0 0 15px -3px hsl(var(--neon-purple) / 0.3),
-                0 0 6px -2px hsl(var(--neon-blue) / 0.2);
+    box-shadow: 0 4px 20px -4px hsl(var(--neon-blue) / 0.12),
+                0 2px 8px -2px hsl(var(--neon-purple) / 0.08);
   }
 
   .glow-border-focus {
-    box-shadow: 0 0 25px -3px hsl(var(--neon-purple) / 0.5),
-                0 0 10px -2px hsl(var(--neon-blue) / 0.3);
+    box-shadow: 0 4px 30px -4px hsl(var(--neon-blue) / 0.2),
+                0 2px 12px -2px hsl(var(--neon-purple) / 0.12);
   }
 
   .glow-text {
-    text-shadow: 0 0 20px hsl(var(--neon-purple) / 0.5);
+    text-shadow: 0 0 30px hsl(var(--neon-blue) / 0.25);
   }
 
   .search-glow {
     @apply border-2 transition-all duration-500;
-    border-color: hsl(var(--neon-purple) / 0.4);
-    box-shadow: 0 0 20px -5px hsl(var(--neon-purple) / 0.3),
-                0 0 40px -10px hsl(var(--neon-blue) / 0.15),
-                inset 0 0 20px -10px hsl(var(--neon-purple) / 0.1);
+    border-color: hsl(var(--neon-blue) / 0.2);
+    box-shadow: 0 4px 25px -5px hsl(var(--neon-blue) / 0.12),
+                0 8px 50px -12px hsl(var(--neon-purple) / 0.08),
+                inset 0 0 20px -10px hsl(var(--neon-blue) / 0.04);
   }
 
   .search-glow:focus-within {
-    border-color: hsl(var(--neon-purple) / 0.7);
-    box-shadow: 0 0 30px -5px hsl(var(--neon-purple) / 0.5),
-                0 0 60px -10px hsl(var(--neon-blue) / 0.25),
-                inset 0 0 30px -10px hsl(var(--neon-purple) / 0.15);
+    border-color: hsl(var(--neon-blue) / 0.4);
+    box-shadow: 0 4px 35px -5px hsl(var(--neon-blue) / 0.2),
+                0 8px 60px -12px hsl(var(--neon-purple) / 0.12),
+                inset 0 0 30px -10px hsl(var(--neon-blue) / 0.06);
   }
 
   .gradient-mesh {
     background: 
-      radial-gradient(ellipse at 20% 50%, hsl(var(--neon-purple) / 0.08) 0%, transparent 50%),
-      radial-gradient(ellipse at 80% 20%, hsl(var(--neon-blue) / 0.06) 0%, transparent 50%),
-      radial-gradient(ellipse at 50% 80%, hsl(var(--neon-purple) / 0.04) 0%, transparent 50%);
+      radial-gradient(ellipse at 20% 50%, hsl(var(--neon-blue) / 0.06) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 20%, hsl(var(--neon-purple) / 0.05) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 80%, hsl(var(--neon-blue) / 0.03) 0%, transparent 50%),
+      hsl(var(--background));
   }
 
   .skeleton-shimmer {
