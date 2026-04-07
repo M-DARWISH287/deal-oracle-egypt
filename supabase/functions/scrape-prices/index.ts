@@ -87,8 +87,10 @@ async function scrapeStore(
     }
 
     // Extract products from response
+    console.log(`${store.name} raw response keys:`, Object.keys(data?.data || data || {}))
+    const extract = data?.data?.extract || data?.extract
     const json = data?.data?.json || data?.json
-    const products = json?.products || []
+    const products = extract?.products || json?.products || []
     console.log(`${store.name}: found ${products.length} products`)
 
     return {
