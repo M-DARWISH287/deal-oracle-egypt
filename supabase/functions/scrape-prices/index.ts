@@ -50,8 +50,8 @@ async function scrapeStore(
       },
       body: JSON.stringify({
         url,
-        formats: ['json'],
-        jsonOptions: {
+        formats: ['extract'],
+        extract: {
           schema: {
             type: 'object',
             properties: {
@@ -62,9 +62,9 @@ async function scrapeStore(
                   properties: {
                     name: { type: 'string', description: 'Product name/title' },
                     name_ar: { type: 'string', description: 'Product name in Arabic if available' },
-                    price: { type: 'number', description: 'Price in EGP (Egyptian Pounds), numeric only' },
-                    url: { type: 'string', description: 'Direct product URL' },
-                    image: { type: 'string', description: 'Product image URL' },
+                    price: { type: 'number', description: 'Price in EGP (Egyptian Pounds), numeric only, no currency symbol' },
+                    url: { type: 'string', description: 'Direct product page URL (full URL)' },
+                    image: { type: 'string', description: 'Product image URL (full URL)' },
                     specs: { type: 'string', description: 'Brief product specifications' },
                   },
                   required: ['name', 'price', 'url'],
@@ -73,10 +73,9 @@ async function scrapeStore(
             },
             required: ['products'],
           },
-          prompt: `Extract all product listings from this ${store.name} search results page. For each product, get the name, price in EGP (Egyptian Pounds as a number), direct product URL, image URL, and brief specs. Only include real products with valid prices.`,
+          prompt: `Extract all product listings visible on this ${store.name} search results page. For each product, extract: the full product name, the price as a number in EGP, the direct URL to the product page, the product image URL, and any visible specifications. Only include real products with valid prices greater than 0.`,
         },
-        onlyMainContent: true,
-        waitFor: 3000,
+        waitFor: 5000,
       }),
     })
 
