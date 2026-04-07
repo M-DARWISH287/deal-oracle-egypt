@@ -9,7 +9,10 @@ export function LanguageToggle() {
     <Button
       variant="ghost"
       size="sm"
-      onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
+      onClick={() => {
+        console.log('TOGGLE CLICKED, current lang:', lang, 'switching to:', lang === 'ar' ? 'en' : 'ar');
+        setLang(lang === 'ar' ? 'en' : 'ar');
+      }}
       className="gap-2 text-muted-foreground hover:text-foreground"
     >
       <Globe className="h-4 w-4" />
