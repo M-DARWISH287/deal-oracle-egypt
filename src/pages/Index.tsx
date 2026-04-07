@@ -2,7 +2,11 @@ import { useNavigate } from 'react-router-dom';
 import { SearchBar } from '@/components/SearchBar';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { useLanguage } from '@/i18n/LanguageContext';
-import { trendingSearches } from '@/data/mockProducts';
+
+const trendingSearches = {
+  ar: ['آيفون 15', 'سامسونج S24', 'ماك بوك', 'إيربودز', 'بلايستيشن 5', 'شاشة سامسونج', 'لابتوب ديل'],
+  en: ['iPhone 15', 'Samsung S24', 'MacBook', 'AirPods', 'PlayStation 5', 'Samsung TV', 'Dell Laptop'],
+};
 import { Sparkles, Zap } from 'lucide-react';
 
 const Index = () => {
