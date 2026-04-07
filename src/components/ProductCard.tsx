@@ -81,7 +81,7 @@ export function ProductCard({ product, index }: ProductCardProps) {
                 {/* Store Logo */}
                 <div className="shrink-0 w-16 h-8 flex items-center justify-center rounded bg-foreground/5 px-1">
                   <img
-                    src={offer.storeLogo}
+                    src={STORE_LOGOS[offer.store] || ''}
                     alt={offer.store}
                     className="max-h-full max-w-full object-contain brightness-0 invert opacity-70"
                     loading="lazy"
