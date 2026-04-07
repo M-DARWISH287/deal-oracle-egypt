@@ -50,33 +50,31 @@ async function scrapeStore(
       },
       body: JSON.stringify({
         url,
-        formats: [
-          {
-            type: 'json',
-            schema: {
-              type: 'object',
-              properties: {
-                products: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      name: { type: 'string', description: 'Product name/title' },
-                      name_ar: { type: 'string', description: 'Product name in Arabic if available' },
-                      price: { type: 'number', description: 'Price in EGP (Egyptian Pounds), numeric only' },
-                      url: { type: 'string', description: 'Direct product URL' },
-                      image: { type: 'string', description: 'Product image URL' },
-                      specs: { type: 'string', description: 'Brief product specifications' },
-                    },
-                    required: ['name', 'price', 'url'],
+        formats: ['json'],
+        jsonOptions: {
+          schema: {
+            type: 'object',
+            properties: {
+              products: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'Product name/title' },
+                    name_ar: { type: 'string', description: 'Product name in Arabic if available' },
+                    price: { type: 'number', description: 'Price in EGP (Egyptian Pounds), numeric only' },
+                    url: { type: 'string', description: 'Direct product URL' },
+                    image: { type: 'string', description: 'Product image URL' },
+                    specs: { type: 'string', description: 'Brief product specifications' },
                   },
+                  required: ['name', 'price', 'url'],
                 },
               },
-              required: ['products'],
             },
-            prompt: `Extract all product listings from this ${store.name} search results page. For each product, get the name, price in EGP (Egyptian Pounds as a number), direct product URL, image URL, and brief specs. Only include real products with valid prices.`,
+            required: ['products'],
           },
-        ],
+          prompt: `Extract all product listings from this ${store.name} search results page. For each product, get the name, price in EGP (Egyptian Pounds as a number), direct product URL, image URL, and brief specs. Only include real products with valid prices.`,
+        },
         onlyMainContent: true,
         waitFor: 3000,
       }),
