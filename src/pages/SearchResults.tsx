@@ -101,7 +101,7 @@ const SearchResults = () => {
                 </span>
               </>
             ) : (
-              <div className="flex items-center gap-2 text-green-400">
+              <div className="flex items-center gap-2 text-primary">
                 <CheckCircle2 className="h-4 w-4" />
                 <span>{lang === 'ar' ? 'اكتمل البحث' : 'Search complete'}</span>
                 <span className="text-muted-foreground">
