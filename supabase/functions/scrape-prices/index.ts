@@ -5,20 +5,16 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-interface StoreOffer {
-  store: string
+const CACHE_TTL_HOURS = 24
+
+interface RawProduct {
+  name: string
+  name_ar?: string
   price: number
   url: string
-  currency: string
-}
-
-interface ProductResult {
-  id: string
-  name: { ar: string; en: string }
-  specs: { ar: string; en: string }
-  image: string
-  category: string
-  offers: StoreOffer[]
+  image?: string
+  specs?: string
+  store: string
 }
 
 function parsePrice(text: string): number | null {
@@ -30,14 +26,41 @@ function parsePrice(text: string): number | null {
   return isNaN(num) ? null : num
 }
 
-// Scrape via Firecrawl (for stores that allow it, e.g. Noon)
+// Store configs - all use Firecrawl except Amazon (SerpApi)
+const STORE_CONFIGS: Record<string, { searchUrl: (q: string) => string; method: 'firecrawl' | 'serpapi' }> = {
+  'Noon': { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Jumia': { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Amazon Egypt': { searchUrl: () => '', method: 'serpapi' },
+  'B.TECH': { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Dream 2000': { searchUrl: q => `https://dream2000.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  '2B Egypt': { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Raya Shop': { searchUrl: q => `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Sigma Computer': { searchUrl: q => `https://sigma-computer.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Tradeline': { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Mobile Shop': { searchUrl: q => `https://mobileshop-eg.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'ElNekhely': { searchUrl: q => `https://www.elnekhelytechnology.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
+}
+
+const ACCESSORY_KEYWORDS = [
+  'case', 'cover', 'protector', 'screen protector', 'tempered glass',
+  'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
+  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة',
+  'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
+]
+
+function isAccessory(name: string): boolean {
+  const lower = name.toLowerCase()
+  return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
+}
+
 async function scrapeWithFirecrawl(
   query: string,
-  store: { name: string; searchUrl: (q: string) => string },
+  storeName: string,
+  searchUrl: string,
   firecrawlKey: string
-): Promise<{ products: any[]; error?: string }> {
-  const url = store.searchUrl(query)
-  console.log(`[Firecrawl] Scraping ${store.name}: ${url}`)
+): Promise<RawProduct[]> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 15000)
 
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
@@ -46,8 +69,9 @@ async function scrapeWithFirecrawl(
         'Authorization': `Bearer ${firecrawlKey}`,
         'Content-Type': 'application/json',
       },
+      signal: controller.signal,
       body: JSON.stringify({
-        url,
+        url: searchUrl,
         formats: ['extract'],
         extract: {
           schema: {
@@ -58,12 +82,12 @@ async function scrapeWithFirecrawl(
                 items: {
                   type: 'object',
                   properties: {
-                    name: { type: 'string', description: 'Product name/title' },
+                    name: { type: 'string', description: 'Full product name/title' },
                     name_ar: { type: 'string', description: 'Product name in Arabic if available' },
-                    price: { type: 'number', description: 'Price in EGP, numeric only' },
-                    url: { type: 'string', description: 'Direct product page URL (full URL)' },
-                    image: { type: 'string', description: 'Product image URL (full URL)' },
-                    specs: { type: 'string', description: 'Brief product specifications' },
+                    price: { type: 'number', description: 'Price in EGP, numeric only, no currency symbol' },
+                    url: { type: 'string', description: 'Direct product page URL (full absolute URL)' },
+                    image: { type: 'string', description: 'Product image URL (full absolute URL)' },
+                    specs: { type: 'string', description: 'Brief product specifications or description' },
                   },
                   required: ['name', 'price', 'url'],
                 },
@@ -71,7 +95,11 @@ async function scrapeWithFirecrawl(
             },
             required: ['products'],
           },
-          prompt: `Extract all product listings visible on this ${store.name} search results page. For each product, extract: the full product name, the price as a number in EGP, the direct URL to the product page, the product image URL, and any visible specifications. Only include real products with valid prices greater than 0.`,
+          prompt: `Extract the top 6 product listings from this ${storeName} search results page for the query "${query}". 
+IMPORTANT: Only extract ACTUAL products matching the search query. 
+DO NOT include accessories like cases, covers, screen protectors, cables, chargers, adapters, holders, or any peripheral items.
+For each product extract: full product name, price as a number in EGP (no currency symbols), direct product page URL, product image URL, and brief specs.
+Only include products with valid prices greater than 0.`,
         },
         waitFor: 5000,
       }),
@@ -79,145 +107,85 @@ async function scrapeWithFirecrawl(
 
     const data = await response.json()
     if (!response.ok) {
-      console.error(`[Firecrawl] Error for ${store.name}:`, data)
-      return { products: [], error: data.error || `Status ${response.status}` }
+      console.error(`[Firecrawl] ${storeName} error:`, data)
+      return []
     }
 
     const extract = data?.data?.extract || data?.extract
-    const json = data?.data?.json || data?.json
-    const products = extract?.products || json?.products || []
-    console.log(`[Firecrawl] ${store.name}: found ${products.length} products`)
+    const products = extract?.products || []
+    console.log(`[Firecrawl] ${storeName}: ${products.length} products`)
 
-    return {
-      products: products
-        .filter((p: any) => p.name && p.price && p.price > 0)
-        .map((p: any) => ({
-          ...p,
-          store: store.name,
-          price: typeof p.price === 'string' ? parsePrice(p.price) : p.price,
-        })),
-    }
+    return products
+      .filter((p: any) => p.name && p.price && p.price > 0 && !isAccessory(p.name))
+      .slice(0, 6)
+      .map((p: any) => ({
+        name: p.name,
+        name_ar: p.name_ar || p.name,
+        price: typeof p.price === 'string' ? parsePrice(p.price) || 0 : p.price,
+        url: p.url,
+        image: p.image || '',
+        specs: p.specs || '',
+        store: storeName,
+      }))
   } catch (err) {
-    console.error(`[Firecrawl] Error scraping ${store.name}:`, err)
-    return { products: [], error: String(err) }
+    if (err instanceof Error && err.name === 'AbortError') {
+      console.error(`[Firecrawl] ${storeName}: timeout after 15s`)
+    } else {
+      console.error(`[Firecrawl] ${storeName} error:`, err)
+    }
+    return []
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
-// Fallback: SerpApi Google Shopping for blocked stores (Amazon, B.TECH)
 async function scrapeWithSerpApi(
   query: string,
   storeName: string,
   serpApiKey: string
-): Promise<{ products: any[]; error?: string }> {
-  console.log(`[SerpApi] Fetching Google Shopping results for "${query}" (${storeName})`)
+): Promise<RawProduct[]> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 15000)
 
   try {
-    // Search Google Shopping Egypt for the query, filtered by store
-    const storeFilter = storeName === 'Amazon Egypt' ? 'amazon.eg' : 'btech.com'
+    const storeFilter = 'amazon.eg'
     const params = new URLSearchParams({
       engine: 'google_shopping',
       q: `${query} site:${storeFilter}`,
       gl: 'eg',
       hl: 'ar',
+      num: '6',
       api_key: serpApiKey,
     })
 
-    const response = await fetch(`https://serpapi.com/search.json?${params}`)
+    const response = await fetch(`https://serpapi.com/search.json?${params}`, {
+      signal: controller.signal,
+    })
     const data = await response.json()
+    if (!response.ok) return []
 
-    if (!response.ok) {
-      console.error(`[SerpApi] Error:`, data)
-      return { products: [], error: data.error || `Status ${response.status}` }
-    }
+    const results = data.shopping_results || []
+    console.log(`[SerpApi] ${storeName}: ${results.length} results`)
 
-    const shoppingResults = data.shopping_results || []
-    console.log(`[SerpApi] ${storeName}: found ${shoppingResults.length} results`)
-
-    return {
-      products: shoppingResults
-        .filter((r: any) => r.price && r.title)
-        .map((r: any) => {
-          const priceNum = parsePrice(r.extracted_price?.toString() || r.price || '0')
-          return {
-            name: r.title || '',
-            name_ar: r.title || '',
-            price: priceNum || 0,
-            url: r.link || r.product_link || '',
-            image: r.thumbnail || '',
-            specs: r.snippet || '',
-            store: storeName,
-          }
-        })
-        .filter((p: any) => p.price > 0),
-    }
+    return results
+      .filter((r: any) => r.title && r.price && !isAccessory(r.title))
+      .slice(0, 6)
+      .map((r: any) => ({
+        name: r.title,
+        name_ar: r.title,
+        price: parsePrice(r.extracted_price?.toString() || r.price || '0') || 0,
+        url: r.link || r.product_link || '',
+        image: r.thumbnail || '',
+        specs: r.snippet || '',
+        store: storeName,
+      }))
+      .filter((p: RawProduct) => p.price > 0)
   } catch (err) {
-    console.error(`[SerpApi] Error for ${storeName}:`, err)
-    return { products: [], error: String(err) }
+    console.error(`[SerpApi] ${storeName} error:`, err)
+    return []
+  } finally {
+    clearTimeout(timeout)
   }
-}
-
-// Store configurations
-const FIRECRAWL_STORES = [
-  {
-    name: 'Noon',
-    searchUrl: (q: string) => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,
-  },
-]
-
-const SERPAPI_STORES = ['Amazon Egypt', 'B.TECH']
-
-// Group scraped results by product similarity
-function groupProducts(allProducts: any[]): ProductResult[] {
-  const grouped: Map<string, ProductResult> = new Map()
-
-  for (const p of allProducts) {
-    const normalizedName = (p.name || '')
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 60)
-
-    let matched = false
-    for (const [key, group] of grouped) {
-      if (
-        normalizedName.includes(key.slice(0, 20)) ||
-        key.includes(normalizedName.slice(0, 20))
-      ) {
-        group.offers.push({
-          store: p.store,
-          price: p.price,
-          url: p.url,
-          currency: 'EGP',
-        })
-        if (p.image && !group.image) group.image = p.image
-        matched = true
-        break
-      }
-    }
-
-    if (!matched) {
-      const id = crypto.randomUUID()
-      grouped.set(normalizedName, {
-        id,
-        name: { en: p.name || '', ar: p.name_ar || p.name || '' },
-        specs: { en: p.specs || '', ar: p.specs || '' },
-        image: p.image || '',
-        category: 'electronics',
-        offers: [{ store: p.store, price: p.price, url: p.url, currency: 'EGP' }],
-      })
-    }
-  }
-
-  return Array.from(grouped.values())
-    .map((p) => {
-      p.offers.sort((a, b) => a.price - b.price)
-      return p
-    })
-    .sort((a, b) => {
-      if (b.offers.length !== a.offers.length) return b.offers.length - a.offers.length
-      return a.offers[0].price - b.offers[0].price
-    })
-    .slice(0, 10)
 }
 
 Deno.serve(async (req) => {
@@ -226,7 +194,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { query } = await req.json()
+    const { query, store } = await req.json()
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
       return new Response(
@@ -235,101 +203,79 @@ Deno.serve(async (req) => {
       )
     }
 
-    const trimmedQuery = query.trim()
-    console.log('Search query:', trimmedQuery)
+    if (!store || typeof store !== 'string' || !STORE_CONFIGS[store]) {
+      return new Response(
+        JSON.stringify({ success: false, error: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}` }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
 
-    // Check cache
+    const trimmedQuery = query.trim().toLowerCase()
+    const cacheKey = `${store}:${trimmedQuery}`
+    console.log(`[${store}] Query: "${trimmedQuery}"`)
+
+    // Check per-store cache (24h TTL)
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const supabase = createClient(supabaseUrl, supabaseKey)
 
     const { data: cached } = await supabase
       .from('search_cache')
-      .select('results')
-      .eq('query', trimmedQuery.toLowerCase())
+      .select('results, created_at')
+      .eq('query', cacheKey)
       .gt('expires_at', new Date().toISOString())
       .order('created_at', { ascending: false })
       .limit(1)
       .single()
 
     if (cached) {
-      console.log('Cache hit!')
+      console.log(`[${store}] Cache hit`)
       return new Response(
-        JSON.stringify({ success: true, data: cached.results, cached: true }),
+        JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
+    // Scrape
+    const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     const serpApiKey = Deno.env.get('SERPAPI_API_KEY')
 
-    if (!firecrawlKey) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Firecrawl not configured' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
+    let products: RawProduct[] = []
 
-    // Scrape all sources in parallel
-    const scrapePromises: Promise<{ products: any[]; error?: string }>[] = []
-
-    // Firecrawl for Noon
-    for (const store of FIRECRAWL_STORES) {
-      scrapePromises.push(scrapeWithFirecrawl(trimmedQuery, store, firecrawlKey))
-    }
-
-    // SerpApi for Amazon & B.TECH (if key available)
-    if (serpApiKey) {
-      for (const storeName of SERPAPI_STORES) {
-        scrapePromises.push(scrapeWithSerpApi(trimmedQuery, storeName, serpApiKey))
+    if (config.method === 'firecrawl') {
+      if (!firecrawlKey) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'Firecrawl not configured', store }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
       }
-    } else {
-      console.warn('SERPAPI_API_KEY not configured — skipping Amazon Egypt & B.TECH')
-    }
-
-    const scrapeResults = await Promise.allSettled(scrapePromises)
-
-    const allProducts: any[] = []
-    const errors: string[] = []
-
-    for (let i = 0; i < scrapeResults.length; i++) {
-      const result = scrapeResults[i]
-      if (result.status === 'fulfilled') {
-        allProducts.push(...result.value.products)
-        if (result.value.error) errors.push(result.value.error)
-      } else {
-        errors.push(String(result.reason))
+      products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
+    } else if (config.method === 'serpapi') {
+      if (!serpApiKey) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'SerpApi not configured', store }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
       }
+      products = await scrapeWithSerpApi(trimmedQuery, store, serpApiKey)
     }
 
-    if (!serpApiKey) {
-      errors.push('Amazon Egypt: SerpApi key not configured')
-      errors.push('B.TECH: SerpApi key not configured')
-    }
+    // Cache results (even empty ones to avoid re-scraping)
+    const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
+    await supabase.from('search_cache').insert({
+      query: cacheKey,
+      results: products as any,
+      expires_at: expiresAt,
+    })
 
-    console.log(`Total products: ${allProducts.length}, errors: ${errors.length}`)
-
-    const groupedProducts = groupProducts(allProducts)
-
-    // Cache results
-    if (groupedProducts.length > 0) {
-      await supabase.from('search_cache').insert({
-        query: trimmedQuery.toLowerCase(),
-        results: groupedProducts,
-      })
-    }
-
+    console.log(`[${store}] Returning ${products.length} products`)
     return new Response(
-      JSON.stringify({
-        success: true,
-        data: groupedProducts,
-        cached: false,
-        storeErrors: errors.length > 0 ? errors : undefined,
-      }),
+      JSON.stringify({ success: true, products, cached: false, store }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   } catch (error) {
-    console.error('Error in scrape-prices:', error)
+    console.error('Error:', error)
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
