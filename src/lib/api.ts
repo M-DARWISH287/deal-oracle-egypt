@@ -1,5 +1,23 @@
 import { supabase } from '@/integrations/supabase/client';
 
+export const ALL_STORES = [
+  'Noon', 'Jumia', 'Amazon Egypt', 'B.TECH', 'Dream 2000',
+  '2B Egypt', 'Raya Shop', 'Sigma Computer', 'Tradeline',
+  'Mobile Shop', 'ElNekhely',
+] as const;
+
+export type StoreName = typeof ALL_STORES[number];
+
+export interface RawProduct {
+  name: string;
+  name_ar?: string;
+  price: number;
+  url: string;
+  image?: string;
+  specs?: string;
+  store: string;
+}
+
 export interface StoreOffer {
   store: string;
   price: number;
@@ -16,23 +34,85 @@ export interface Product {
   offers: StoreOffer[];
 }
 
-export interface SearchResponse {
+export interface StoreSearchResult {
   success: boolean;
-  data?: Product[];
-  cached?: boolean;
-  storeErrors?: string[];
+  products: RawProduct[];
+  cached: boolean;
+  store: string;
+  cachedAt?: string;
   error?: string;
 }
 
-export async function searchProducts(query: string): Promise<SearchResponse> {
-  const { data, error } = await supabase.functions.invoke('scrape-prices', {
-    body: { query },
-  });
+export async function searchStore(query: string, store: string): Promise<StoreSearchResult> {
+  try {
+    const { data, error } = await supabase.functions.invoke('scrape-prices', {
+      body: { query, store },
+    });
 
-  if (error) {
-    console.error('Edge function error:', error);
-    return { success: false, error: error.message };
+    if (error) {
+      console.error(`[${store}] Error:`, error);
+      return { success: false, products: [], cached: false, store, error: error.message };
+    }
+
+    return data as StoreSearchResult;
+  } catch (err) {
+    return { success: false, products: [], cached: false, store, error: String(err) };
+  }
+}
+
+// Group raw products from multiple stores into unified Product cards
+export function groupProducts(allProducts: RawProduct[]): Product[] {
+  const grouped: Map<string, Product> = new Map();
+
+  for (const p of allProducts) {
+    const normalizedName = (p.name || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 60);
+
+    let matched = false;
+    for (const [key, group] of grouped) {
+      if (
+        normalizedName.includes(key.slice(0, 25)) ||
+        key.includes(normalizedName.slice(0, 25))
+      ) {
+        // Don't add duplicate store offers
+        if (!group.offers.some(o => o.store === p.store && o.url === p.url)) {
+          group.offers.push({
+            store: p.store,
+            price: p.price,
+            url: p.url,
+            currency: 'EGP',
+          });
+        }
+        if (p.image && !group.image) group.image = p.image;
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      const id = crypto.randomUUID();
+      grouped.set(normalizedName, {
+        id,
+        name: { en: p.name || '', ar: p.name_ar || p.name || '' },
+        specs: { en: p.specs || '', ar: p.specs || '' },
+        image: p.image || '',
+        category: 'electronics',
+        offers: [{ store: p.store, price: p.price, url: p.url, currency: 'EGP' }],
+      });
+    }
   }
 
-  return data as SearchResponse;
+  return Array.from(grouped.values())
+    .map((p) => {
+      p.offers.sort((a, b) => a.price - b.price);
+      return p;
+    })
+    .sort((a, b) => {
+      if (b.offers.length !== a.offers.length) return b.offers.length - a.offers.length;
+      return a.offers[0].price - b.offers[0].price;
+    })
+    .slice(0, 15);
 }
