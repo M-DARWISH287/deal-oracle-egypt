@@ -21,9 +21,7 @@ interface ProductResult {
   offers: StoreOffer[]
 }
 
-// Parse price from text, handling Arabic numerals and EGP formats
 function parsePrice(text: string): number | null {
-  // Remove currency symbols, commas, spaces
   const cleaned = text
     .replace(/[^\d٠-٩.,]/g, '')
     .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
@@ -32,14 +30,14 @@ function parsePrice(text: string): number | null {
   return isNaN(num) ? null : num
 }
 
-// Scrape a store using Firecrawl
-async function scrapeStore(
+// Scrape via Firecrawl (for stores that allow it, e.g. Noon)
+async function scrapeWithFirecrawl(
   query: string,
   store: { name: string; searchUrl: (q: string) => string },
   firecrawlKey: string
 ): Promise<{ products: any[]; error?: string }> {
   const url = store.searchUrl(query)
-  console.log(`Scraping ${store.name}: ${url}`)
+  console.log(`[Firecrawl] Scraping ${store.name}: ${url}`)
 
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
@@ -62,7 +60,7 @@ async function scrapeStore(
                   properties: {
                     name: { type: 'string', description: 'Product name/title' },
                     name_ar: { type: 'string', description: 'Product name in Arabic if available' },
-                    price: { type: 'number', description: 'Price in EGP (Egyptian Pounds), numeric only, no currency symbol' },
+                    price: { type: 'number', description: 'Price in EGP, numeric only' },
                     url: { type: 'string', description: 'Direct product page URL (full URL)' },
                     image: { type: 'string', description: 'Product image URL (full URL)' },
                     specs: { type: 'string', description: 'Brief product specifications' },
@@ -80,18 +78,15 @@ async function scrapeStore(
     })
 
     const data = await response.json()
-
     if (!response.ok) {
-      console.error(`Firecrawl error for ${store.name}:`, data)
+      console.error(`[Firecrawl] Error for ${store.name}:`, data)
       return { products: [], error: data.error || `Status ${response.status}` }
     }
 
-    // Extract products from response
-    console.log(`${store.name} raw response keys:`, Object.keys(data?.data || data || {}))
     const extract = data?.data?.extract || data?.extract
     const json = data?.data?.json || data?.json
     const products = extract?.products || json?.products || []
-    console.log(`${store.name}: found ${products.length} products`)
+    console.log(`[Firecrawl] ${store.name}: found ${products.length} products`)
 
     return {
       products: products
@@ -103,47 +98,91 @@ async function scrapeStore(
         })),
     }
   } catch (err) {
-    console.error(`Error scraping ${store.name}:`, err)
+    console.error(`[Firecrawl] Error scraping ${store.name}:`, err)
+    return { products: [], error: String(err) }
+  }
+}
+
+// Fallback: SerpApi Google Shopping for blocked stores (Amazon, B.TECH)
+async function scrapeWithSerpApi(
+  query: string,
+  storeName: string,
+  serpApiKey: string
+): Promise<{ products: any[]; error?: string }> {
+  console.log(`[SerpApi] Fetching Google Shopping results for "${query}" (${storeName})`)
+
+  try {
+    // Search Google Shopping Egypt for the query, filtered by store
+    const storeFilter = storeName === 'Amazon Egypt' ? 'amazon.eg' : 'btech.com'
+    const params = new URLSearchParams({
+      engine: 'google_shopping',
+      q: `${query} site:${storeFilter}`,
+      gl: 'eg',
+      hl: 'ar',
+      api_key: serpApiKey,
+    })
+
+    const response = await fetch(`https://serpapi.com/search.json?${params}`)
+    const data = await response.json()
+
+    if (!response.ok) {
+      console.error(`[SerpApi] Error:`, data)
+      return { products: [], error: data.error || `Status ${response.status}` }
+    }
+
+    const shoppingResults = data.shopping_results || []
+    console.log(`[SerpApi] ${storeName}: found ${shoppingResults.length} results`)
+
+    return {
+      products: shoppingResults
+        .filter((r: any) => r.price && r.title)
+        .map((r: any) => {
+          const priceNum = parsePrice(r.extracted_price?.toString() || r.price || '0')
+          return {
+            name: r.title || '',
+            name_ar: r.title || '',
+            price: priceNum || 0,
+            url: r.link || r.product_link || '',
+            image: r.thumbnail || '',
+            specs: r.snippet || '',
+            store: storeName,
+          }
+        })
+        .filter((p: any) => p.price > 0),
+    }
+  } catch (err) {
+    console.error(`[SerpApi] Error for ${storeName}:`, err)
     return { products: [], error: String(err) }
   }
 }
 
 // Store configurations
-const STORES = [
-  {
-    name: 'Amazon Egypt',
-    searchUrl: (q: string) => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`,
-  },
+const FIRECRAWL_STORES = [
   {
     name: 'Noon',
     searchUrl: (q: string) => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,
   },
-  {
-    name: 'B.TECH',
-    searchUrl: (q: string) => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,
-  },
 ]
+
+const SERPAPI_STORES = ['Amazon Egypt', 'B.TECH']
 
 // Group scraped results by product similarity
 function groupProducts(allProducts: any[]): ProductResult[] {
   const grouped: Map<string, ProductResult> = new Map()
 
   for (const p of allProducts) {
-    // Simple grouping: normalize product name
     const normalizedName = (p.name || '')
       .toLowerCase()
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 60)
 
-    // Find existing group by checking name similarity
     let matched = false
     for (const [key, group] of grouped) {
       if (
         normalizedName.includes(key.slice(0, 20)) ||
         key.includes(normalizedName.slice(0, 20))
       ) {
-        // Add as another offer
         group.offers.push({
           store: p.store,
           price: p.price,
@@ -160,36 +199,21 @@ function groupProducts(allProducts: any[]): ProductResult[] {
       const id = crypto.randomUUID()
       grouped.set(normalizedName, {
         id,
-        name: {
-          en: p.name || '',
-          ar: p.name_ar || p.name || '',
-        },
-        specs: {
-          en: p.specs || '',
-          ar: p.specs || '',
-        },
+        name: { en: p.name || '', ar: p.name_ar || p.name || '' },
+        specs: { en: p.specs || '', ar: p.specs || '' },
         image: p.image || '',
         category: 'electronics',
-        offers: [
-          {
-            store: p.store,
-            price: p.price,
-            url: p.url,
-            currency: 'EGP',
-          },
-        ],
+        offers: [{ store: p.store, price: p.price, url: p.url, currency: 'EGP' }],
       })
     }
   }
 
-  // Sort products by lowest best price, return top results
   return Array.from(grouped.values())
     .map((p) => {
       p.offers.sort((a, b) => a.price - b.price)
       return p
     })
     .sort((a, b) => {
-      // Products with more offers first
       if (b.offers.length !== a.offers.length) return b.offers.length - a.offers.length
       return a.offers[0].price - b.offers[0].price
     })
@@ -214,7 +238,7 @@ Deno.serve(async (req) => {
     const trimmedQuery = query.trim()
     console.log('Search query:', trimmedQuery)
 
-    // Check cache first
+    // Check cache
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const supabase = createClient(supabaseUrl, supabaseKey)
@@ -236,8 +260,9 @@ Deno.serve(async (req) => {
       )
     }
 
-    // Scrape all stores in parallel
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
+    const serpApiKey = Deno.env.get('SERPAPI_API_KEY')
+
     if (!firecrawlKey) {
       return new Response(
         JSON.stringify({ success: false, error: 'Firecrawl not configured' }),
@@ -245,9 +270,24 @@ Deno.serve(async (req) => {
       )
     }
 
-    const scrapeResults = await Promise.allSettled(
-      STORES.map((store) => scrapeStore(trimmedQuery, store, firecrawlKey))
-    )
+    // Scrape all sources in parallel
+    const scrapePromises: Promise<{ products: any[]; error?: string }>[] = []
+
+    // Firecrawl for Noon
+    for (const store of FIRECRAWL_STORES) {
+      scrapePromises.push(scrapeWithFirecrawl(trimmedQuery, store, firecrawlKey))
+    }
+
+    // SerpApi for Amazon & B.TECH (if key available)
+    if (serpApiKey) {
+      for (const storeName of SERPAPI_STORES) {
+        scrapePromises.push(scrapeWithSerpApi(trimmedQuery, storeName, serpApiKey))
+      }
+    } else {
+      console.warn('SERPAPI_API_KEY not configured — skipping Amazon Egypt & B.TECH')
+    }
+
+    const scrapeResults = await Promise.allSettled(scrapePromises)
 
     const allProducts: any[] = []
     const errors: string[] = []
@@ -256,18 +296,22 @@ Deno.serve(async (req) => {
       const result = scrapeResults[i]
       if (result.status === 'fulfilled') {
         allProducts.push(...result.value.products)
-        if (result.value.error) errors.push(`${STORES[i].name}: ${result.value.error}`)
+        if (result.value.error) errors.push(result.value.error)
       } else {
-        errors.push(`${STORES[i].name}: ${result.reason}`)
+        errors.push(String(result.reason))
       }
     }
 
-    console.log(`Total products scraped: ${allProducts.length}, errors: ${errors.length}`)
+    if (!serpApiKey) {
+      errors.push('Amazon Egypt: SerpApi key not configured')
+      errors.push('B.TECH: SerpApi key not configured')
+    }
 
-    // Group by product
+    console.log(`Total products: ${allProducts.length}, errors: ${errors.length}`)
+
     const groupedProducts = groupProducts(allProducts)
 
-    // Cache results (1 hour TTL)
+    // Cache results
     if (groupedProducts.length > 0) {
       await supabase.from('search_cache').insert({
         query: trimmedQuery.toLowerCase(),
