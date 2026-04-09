@@ -34,12 +34,11 @@ export function ProductCard({ product, index }: ProductCardProps) {
 
   return (
     <div
-      className="glow-border rounded-2xl bg-card p-5 opacity-0 animate-fade-in-stagger"
-      style={{ animationDelay: `${index * 100}ms`, animationFillMode: 'forwards' }}
+      className="rounded-2xl bg-white border border-border p-5 shadow-sm hover:shadow-md transition-shadow opacity-0 animate-fade-in"
+      style={{ animationDelay: `${index * 80}ms`, animationFillMode: 'forwards' }}
     >
       <div className="flex flex-col sm:flex-row gap-5">
-        {/* Product Image */}
-        <div className="shrink-0 flex items-center justify-center w-full sm:w-36 h-36 rounded-xl bg-secondary/50 p-3 overflow-hidden">
+        <div className="shrink-0 flex items-center justify-center w-full sm:w-36 h-36 rounded-xl bg-secondary p-3 overflow-hidden">
           <img
             src={product.image}
             alt={product.name[lang]}
@@ -48,14 +47,12 @@ export function ProductCard({ product, index }: ProductCardProps) {
           />
         </div>
 
-        {/* Product Info */}
         <div className="flex-1 min-w-0">
           <h3 className="text-lg font-bold text-foreground mb-1">{product.name[lang]}</h3>
           <p className="text-sm text-muted-foreground mb-4">{product.specs[lang]}</p>
 
-          {/* Best Price Badge */}
           <div className="flex items-center gap-2 mb-4">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-neon-green/15 px-3 py-1 text-sm font-semibold text-neon-green">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-600">
               <Tag className="h-3.5 w-3.5" />
               {t('bestPrice')}
             </span>
@@ -67,23 +64,21 @@ export function ProductCard({ product, index }: ProductCardProps) {
             </span>
           </div>
 
-          {/* Store Offers */}
           <div className="space-y-2">
             {sortedOffers.map((offer, i) => (
               <div
                 key={offer.store}
                 className={`flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors ${
                   i === 0
-                    ? 'bg-neon-green/5 border border-neon-green/20'
-                    : 'bg-secondary/30 hover:bg-secondary/50'
+                    ? 'bg-emerald-50 border border-emerald-200'
+                    : 'bg-secondary hover:bg-secondary/80'
                 }`}
               >
-                {/* Store Logo */}
-                <div className="shrink-0 w-16 h-8 flex items-center justify-center rounded bg-foreground/5 px-1">
+                <div className="shrink-0 w-16 h-8 flex items-center justify-center rounded bg-white px-1">
                   <img
                     src={STORE_LOGOS[offer.store] || ''}
                     alt={offer.store}
-                    className="max-h-full max-w-full object-contain brightness-0 invert opacity-70"
+                    className="max-h-full max-w-full object-contain opacity-70"
                     loading="lazy"
                     onError={(e) => {
                       (e.target as HTMLImageElement).style.display = 'none';
@@ -92,20 +87,18 @@ export function ProductCard({ product, index }: ProductCardProps) {
                   />
                 </div>
 
-                {/* Price */}
-                <span className={`font-bold flex-1 ${i === 0 ? 'text-neon-green' : 'text-foreground'}`}>
+                <span className={`font-bold flex-1 ${i === 0 ? 'text-emerald-600' : 'text-foreground'}`}>
                   {formatPrice(offer.price)} {t('egp')}
                 </span>
 
-                {/* Actions */}
                 <div className="flex items-center gap-1.5">
                   <button
                     onClick={() => copyLink(offer.url)}
-                    className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+                    className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white transition-colors"
                     title={t('copyLink')}
                   >
                     {copiedUrl === offer.url ? (
-                      <Check className="h-3.5 w-3.5 text-neon-green" />
+                      <Check className="h-3.5 w-3.5 text-emerald-500" />
                     ) : (
                       <Copy className="h-3.5 w-3.5" />
                     )}
@@ -117,8 +110,8 @@ export function ProductCard({ product, index }: ProductCardProps) {
                     rel="noopener noreferrer"
                     className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
                       i === 0
-                        ? 'bg-neon-green/20 text-neon-green hover:bg-neon-green/30'
-                        : 'bg-primary/15 text-primary hover:bg-primary/25'
+                        ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                        : 'bg-purple-50 text-purple-600 hover:bg-purple-100'
                     }`}
                   >
                     {t('buy')}
