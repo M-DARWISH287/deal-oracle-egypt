@@ -18,10 +18,10 @@ interface RawProduct {
 }
 
 function parsePrice(text: string): number | null {
+  if (!text) return null
   const cleaned = text
-    .replace(/[^\d٠-٩.,]/g, '')
     .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
-    .replace(/,/g, '')
+    .replace(/[^0-9.]/g, '')
   const num = parseFloat(cleaned)
   return isNaN(num) ? null : num
 }

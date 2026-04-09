@@ -1,9 +1,9 @@
 import { supabase } from '@/integrations/supabase/client';
 
 export const ALL_STORES = [
-  'Noon', 'Jumia', 'Amazon Egypt', 'B.TECH', 'Dream 2000',
-  '2B Egypt', 'Raya Shop', 'Sigma Computer', 'Tradeline',
-  'Mobile Shop', 'ElNekhely',
+  'Jumia', 'Dream 2000', '2B Egypt', 'Raya Shop',
+  'Sigma Computer', 'Tradeline', 'Mobile Shop', 'ElNekhely',
+  'Noon', 'Amazon Egypt', 'B.TECH',
 ] as const;
 
 export type StoreName = typeof ALL_STORES[number];
@@ -43,6 +43,18 @@ export interface StoreSearchResult {
   error?: string;
 }
 
+export async function normalizeQuery(rawQuery: string): Promise<string> {
+  try {
+    const { data, error } = await supabase.functions.invoke('normalize-query', {
+      body: { query: rawQuery },
+    });
+    if (error || !data?.normalized) return rawQuery;
+    return data.normalized;
+  } catch {
+    return rawQuery;
+  }
+}
+
 export async function searchStore(query: string, store: string): Promise<StoreSearchResult> {
   try {
     const { data, error } = await supabase.functions.invoke('scrape-prices', {
@@ -60,11 +72,12 @@ export async function searchStore(query: string, store: string): Promise<StoreSe
   }
 }
 
-// Group raw products from multiple stores into unified Product cards
 export function groupProducts(allProducts: RawProduct[]): Product[] {
   const grouped: Map<string, Product> = new Map();
 
   for (const p of allProducts) {
+    if (!p.price || p.price <= 0) continue;
+    
     const normalizedName = (p.name || '')
       .toLowerCase()
       .replace(/\s+/g, ' ')
@@ -77,7 +90,6 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
         normalizedName.includes(key.slice(0, 25)) ||
         key.includes(normalizedName.slice(0, 25))
       ) {
-        // Don't add duplicate store offers
         if (!group.offers.some(o => o.store === p.store && o.url === p.url)) {
           group.offers.push({
             store: p.store,
@@ -114,5 +126,5 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
       if (b.offers.length !== a.offers.length) return b.offers.length - a.offers.length;
       return a.offers[0].price - b.offers[0].price;
     })
-    .slice(0, 15);
+    .slice(0, 20);
 }
