@@ -7,8 +7,9 @@ const STORE_LOGOS: Record<string, string> = {
   'Amazon Egypt': 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Amazon_logo.svg/200px-Amazon_logo.svg.png',
   'Noon': 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7e/Noon_logo.svg/200px-Noon_logo.svg.png',
   'B.TECH': 'https://btech.com/media/logo/stores/1/BTECH-LOGO.png',
-  '2B': 'https://2b.com.eg/media/logo/stores/1/2b-logo.png',
+  '2B Egypt': 'https://2b.com.eg/media/logo/stores/1/2b-logo.png',
   'Tradeline': 'https://tradeline.com.eg/skin/frontend/base/default/images/tradeline-logo.png',
+  'Jumia': 'https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/Jumia_Logo.svg/200px-Jumia_Logo.svg.png',
 };
 
 interface ProductCardProps {
