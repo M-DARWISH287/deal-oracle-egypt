@@ -160,8 +160,7 @@ async function scrapeWithSerpApi(
     const params = new URLSearchParams({
       engine: 'google_shopping',
       q: searchQuery,
-      gl: 'eg',
-      hl: 'ar',
+      hl: 'en',
       num: '5',
       api_key: serpApiKey,
     })
