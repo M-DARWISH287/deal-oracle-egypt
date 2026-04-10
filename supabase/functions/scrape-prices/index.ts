@@ -170,13 +170,14 @@ async function scrapeWithSerpApi(
       signal: controller.signal,
     })
     const data = await response.json()
+    console.log(`[SerpApi] ${storeName}: RAW response status=${response.status}`)
+    console.log(`[SerpApi] ${storeName}: RAW result keys=${JSON.stringify(Object.keys(data))}`)
+    console.log(`[SerpApi] ${storeName}: RAW shopping_results count=${(data.shopping_results || []).length}`)
+    console.log(`[SerpApi] ${storeName}: RAW first 2 results=`, JSON.stringify((data.shopping_results || []).slice(0, 2)))
+    if (data.error) console.error(`[SerpApi] ${storeName}: API error=`, data.error)
     if (!response.ok) return []
 
     const results = data.shopping_results || []
-    console.log(`[SerpApi] ${storeName}: RAW response status=${response.status}`)
-    console.log(`[SerpApi] ${storeName}: RAW result keys=${JSON.stringify(Object.keys(data))}`)
-    console.log(`[SerpApi] ${storeName}: RAW results count=${results.length}`)
-    console.log(`[SerpApi] ${storeName}: RAW results BEFORE filters=`, JSON.stringify(results.slice(0, 3)))
 
     return results
       .filter((r: any) => r.title && r.price && !isAccessory(r.title))
