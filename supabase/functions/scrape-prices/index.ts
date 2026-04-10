@@ -156,12 +156,12 @@ async function scrapeWithSerpApi(
 
   try {
     const storeFilter = SERPAPI_STORE_FILTERS[storeName] || ''
-    const searchQuery = storeFilter ? `${query} site:${storeFilter}` : query
+    const searchQuery = storeFilter ? `${query} ${storeFilter}` : query
     const params = new URLSearchParams({
       engine: 'google_shopping',
       q: searchQuery,
       hl: 'en',
-      num: '5',
+      num: '10',
       api_key: serpApiKey,
     })
 
