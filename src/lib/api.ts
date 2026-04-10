@@ -1,10 +1,9 @@
 import { supabase } from '@/integrations/supabase/client';
 
+// TOP 6 CORE STORES ONLY — secondary stores disabled to stop credit burn
 export const ALL_STORES = [
-  'Jumia', 'Noon', 'Amazon Egypt', 'B.TECH',
-  'Dream 2000', '2B Egypt', 'Raya Shop',
-  'Sigma Computer', 'Tradeline', 'Mobile Shop',
-  'ElNekhely', 'Compumarts', 'Select.eg',
+  'Amazon Egypt', 'Noon', 'B.TECH',
+  'Jumia', '2B Egypt', 'Tradeline',
 ] as const;
 
 export type StoreName = typeof ALL_STORES[number];

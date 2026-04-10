@@ -1,0 +1,1 @@
+DELETE FROM search_cache WHERE query LIKE 'Amazon Egypt%' OR query LIKE 'B.TECH%';

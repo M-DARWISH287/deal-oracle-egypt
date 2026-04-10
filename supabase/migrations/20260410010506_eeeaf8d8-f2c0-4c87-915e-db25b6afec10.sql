@@ -1,0 +1,1 @@
+DELETE FROM search_cache WHERE results::text = '[]' OR jsonb_array_length(results::jsonb) = 0;
