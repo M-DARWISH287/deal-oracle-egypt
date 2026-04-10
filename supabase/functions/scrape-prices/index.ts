@@ -60,7 +60,7 @@ async function scrapeWithFirecrawl(
   firecrawlKey: string
 ): Promise<RawProduct[]> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 15000)
+  const timeout = setTimeout(() => controller.abort(), 30000)
 
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
@@ -136,7 +136,7 @@ Only include products that are clearly listed with a price.`,
       .filter((p: RawProduct) => p.price > 0)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      console.error(`[Firecrawl] ${storeName}: timeout after 15s`)
+      console.error(`[Firecrawl] ${storeName}: timeout after 30s`)
     } else {
       console.error(`[Firecrawl] ${storeName} error:`, err)
     }
