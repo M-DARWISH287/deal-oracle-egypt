@@ -1,9 +1,10 @@
 import { supabase } from '@/integrations/supabase/client';
 
 export const ALL_STORES = [
-  'Jumia', 'Dream 2000', '2B Egypt', 'Raya Shop',
-  'Sigma Computer', 'Tradeline', 'Mobile Shop', 'ElNekhely',
-  'Noon', 'Amazon Egypt', 'B.TECH',
+  'Jumia', 'Noon', 'Amazon Egypt', 'B.TECH',
+  'Dream 2000', '2B Egypt', 'Raya Shop',
+  'Sigma Computer', 'Tradeline', 'Mobile Shop',
+  'ElNekhely', 'Compumarts', 'Select.eg',
 ] as const;
 
 export type StoreName = typeof ALL_STORES[number];
@@ -41,18 +42,6 @@ export interface StoreSearchResult {
   store: string;
   cachedAt?: string;
   error?: string;
-}
-
-export async function normalizeQuery(rawQuery: string): Promise<string> {
-  try {
-    const { data, error } = await supabase.functions.invoke('normalize-query', {
-      body: { query: rawQuery },
-    });
-    if (error || !data?.normalized) return rawQuery;
-    return data.normalized;
-  } catch {
-    return rawQuery;
-  }
 }
 
 export async function searchStore(query: string, store: string): Promise<StoreSearchResult> {
@@ -126,5 +115,5 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
       if (b.offers.length !== a.offers.length) return b.offers.length - a.offers.length;
       return a.offers[0].price - b.offers[0].price;
     })
-    .slice(0, 20);
+    .slice(0, 30);
 }

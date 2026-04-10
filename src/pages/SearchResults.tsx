@@ -5,8 +5,8 @@ import { StoreSelector } from '@/components/StoreSelector';
 import { ProductCard } from '@/components/ProductCard';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { useLanguage } from '@/i18n/LanguageContext';
-import { searchStore, normalizeQuery, groupProducts, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
-import { Zap, Sparkles, SearchX, CheckCircle2, Loader2 } from 'lucide-react';
+import { searchStore, groupProducts, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
+import { Zap, SearchX, CheckCircle2, Loader2 } from 'lucide-react';
 
 const SearchResults = () => {
   const [searchParams] = useSearchParams();
@@ -18,7 +18,6 @@ const SearchResults = () => {
   const [pendingStores, setPendingStores] = useState<Set<string>>(new Set());
   const [completedStores, setCompletedStores] = useState<Map<string, { count: number; cached: boolean }>>(new Map());
   const [hasStarted, setHasStarted] = useState(false);
-  const [normalizedQuery, setNormalizedQuery] = useState('');
   const [selectedStores, setSelectedStores] = useState<Set<string>>(new Set(ALL_STORES));
   const allProductsRef = useRef<RawProduct[]>([]);
 
@@ -42,33 +41,28 @@ const SearchResults = () => {
     setCompletedStores(new Map());
     setHasStarted(true);
     allProductsRef.current = [];
-    setNormalizedQuery('');
 
     const storesToSearch = ALL_STORES.filter(s => selectedStores.has(s));
     setPendingStores(new Set(storesToSearch));
 
-    // Step 1: Normalize query via AI
-    normalizeQuery(query).then((optimized) => {
-      setNormalizedQuery(optimized);
-
-      // Step 2: Fire parallel scraping for selected stores only
-      storesToSearch.forEach((store) => {
-        searchStore(optimized, store).then((result) => {
-          if (result.success && result.products.length > 0) {
-            allProductsRef.current = [...allProductsRef.current, ...result.products];
-            setProducts(groupProducts(allProductsRef.current));
-            setCompletedStores(prev => new Map(prev).set(store, {
-              count: result.products.length,
-              cached: result.cached,
-            }));
-          } else {
-            setCompletedStores(prev => new Map(prev).set(store, { count: 0, cached: false }));
-          }
-          setPendingStores(prev => {
-            const next = new Set(prev);
-            next.delete(store);
-            return next;
-          });
+    // Send raw query directly to scrapers (bypass AI normalization)
+    storesToSearch.forEach((store) => {
+      searchStore(query, store).then((result) => {
+        if (result.success && result.products.length > 0) {
+          allProductsRef.current = [...allProductsRef.current, ...result.products];
+          setProducts(groupProducts(allProductsRef.current));
+          setCompletedStores(prev => new Map(prev).set(store, {
+            count: result.products.length,
+            cached: result.cached,
+          }));
+        } else {
+          console.log(`[${store}] 0 results${result.error ? ': ' + result.error : ''}`);
+          setCompletedStores(prev => new Map(prev).set(store, { count: 0, cached: false }));
+        }
+        setPendingStores(prev => {
+          const next = new Set(prev);
+          next.delete(store);
+          return next;
         });
       });
     });
@@ -80,7 +74,6 @@ const SearchResults = () => {
 
   return (
     <div className="min-h-screen bg-slate-50">
-      {/* Header */}
       <header className="sticky top-0 z-50 border-b border-border bg-white/90 backdrop-blur-lg">
         <div className="mx-auto max-w-4xl flex items-center gap-3 px-4 py-3">
           <button onClick={() => navigate('/')} className="flex items-center gap-1.5 shrink-0">
@@ -95,16 +88,7 @@ const SearchResults = () => {
       </header>
 
       <main className="mx-auto max-w-4xl px-4 py-4 space-y-4">
-        {/* Store selector chips */}
         <StoreSelector selectedStores={selectedStores} onToggle={toggleStore} />
-
-        {/* AI normalization info */}
-        {normalizedQuery && normalizedQuery !== query && (
-          <div className="text-xs text-muted-foreground flex items-center gap-1.5 animate-fade-in">
-            <Sparkles className="h-3.5 w-3.5 text-purple-400" />
-            {lang === 'ar' ? `البحث عن: "${normalizedQuery}"` : `Searching for: "${normalizedQuery}"`}
-          </div>
-        )}
 
         {/* Live progress */}
         {hasStarted && (

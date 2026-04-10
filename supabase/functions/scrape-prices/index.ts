@@ -10,7 +10,7 @@ const CACHE_TTL_HOURS = 24
 interface RawProduct {
   name: string
   name_ar?: string
-  price: number
+  price: number | string
   url: string
   image?: string
   specs?: string
@@ -26,12 +26,11 @@ function parsePrice(text: string): number | null {
   return isNaN(num) ? null : num
 }
 
-// Store configs - all use Firecrawl except Amazon (SerpApi)
 const STORE_CONFIGS: Record<string, { searchUrl: (q: string) => string; method: 'firecrawl' | 'serpapi' }> = {
   'Noon': { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'Jumia': { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'Amazon Egypt': { searchUrl: () => '', method: 'serpapi' },
-  'B.TECH': { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'B.TECH': { searchUrl: () => '', method: 'serpapi' },
   'Dream 2000': { searchUrl: q => `https://dream2000.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
   '2B Egypt': { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'Raya Shop': { searchUrl: q => `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
@@ -39,6 +38,13 @@ const STORE_CONFIGS: Record<string, { searchUrl: (q: string) => string; method: 
   'Tradeline': { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'Mobile Shop': { searchUrl: q => `https://mobileshop-eg.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'ElNekhely': { searchUrl: q => `https://www.elnekhelytechnology.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Compumarts': { searchUrl: q => `https://compumarts.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Select.eg': { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
+}
+
+const SERPAPI_STORE_FILTERS: Record<string, string> = {
+  'Amazon Egypt': 'amazon.eg',
+  'B.TECH': 'btech.com',
 }
 
 const ACCESSORY_KEYWORDS = [
@@ -84,7 +90,7 @@ async function scrapeWithFirecrawl(
                   properties: {
                     name: { type: 'string', description: 'Full product name/title' },
                     name_ar: { type: 'string', description: 'Product name in Arabic if available' },
-                    price: { type: 'number', description: 'Price in EGP, numeric only, no currency symbol' },
+                    price: { type: 'string', description: 'Price as displayed on the page, including currency' },
                     url: { type: 'string', description: 'Direct product page URL (full absolute URL)' },
                     image: { type: 'string', description: 'Product image URL (full absolute URL)' },
                     specs: { type: 'string', description: 'Brief product specifications or description' },
@@ -95,11 +101,11 @@ async function scrapeWithFirecrawl(
             },
             required: ['products'],
           },
-          prompt: `Extract the top 6 product listings from this ${storeName} search results page for the query "${query}". 
+          prompt: `Extract the top 5 product listings from this ${storeName} search results page for the query "${query}". 
 IMPORTANT: Only extract ACTUAL products matching the search query. 
 DO NOT include accessories like cases, covers, screen protectors, cables, chargers, adapters, holders, or any peripheral items.
-For each product extract: full product name, price as a number in EGP (no currency symbols), direct product page URL, product image URL, and brief specs.
-Only include products with valid prices greater than 0.`,
+For each product extract: full product name, price as shown on page, direct product page URL, product image URL, and brief specs.
+Only include products that are clearly listed with a price.`,
         },
         waitFor: 5000,
       }),
@@ -116,17 +122,21 @@ Only include products with valid prices greater than 0.`,
     console.log(`[Firecrawl] ${storeName}: ${products.length} products`)
 
     return products
-      .filter((p: any) => p.name && p.price && p.price > 0 && !isAccessory(p.name))
-      .slice(0, 6)
-      .map((p: any) => ({
-        name: p.name,
-        name_ar: p.name_ar || p.name,
-        price: typeof p.price === 'string' ? parsePrice(p.price) || 0 : p.price,
-        url: p.url,
-        image: p.image || '',
-        specs: p.specs || '',
-        store: storeName,
-      }))
+      .filter((p: any) => p.name && p.price && !isAccessory(p.name))
+      .slice(0, 5)
+      .map((p: any) => {
+        const parsed = parsePrice(String(p.price))
+        return {
+          name: p.name,
+          name_ar: p.name_ar || p.name,
+          price: parsed !== null ? parsed : 0,
+          url: p.url,
+          image: p.image || '',
+          specs: p.specs || '',
+          store: storeName,
+        }
+      })
+      .filter((p: RawProduct) => p.price > 0)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       console.error(`[Firecrawl] ${storeName}: timeout after 15s`)
@@ -148,13 +158,14 @@ async function scrapeWithSerpApi(
   const timeout = setTimeout(() => controller.abort(), 15000)
 
   try {
-    const storeFilter = 'amazon.eg'
+    const storeFilter = SERPAPI_STORE_FILTERS[storeName] || ''
+    const searchQuery = storeFilter ? `${query} site:${storeFilter}` : query
     const params = new URLSearchParams({
       engine: 'google_shopping',
-      q: `${query} site:${storeFilter}`,
+      q: searchQuery,
       gl: 'eg',
       hl: 'ar',
-      num: '6',
+      num: '5',
       api_key: serpApiKey,
     })
 
@@ -169,16 +180,19 @@ async function scrapeWithSerpApi(
 
     return results
       .filter((r: any) => r.title && r.price && !isAccessory(r.title))
-      .slice(0, 6)
-      .map((r: any) => ({
-        name: r.title,
-        name_ar: r.title,
-        price: parsePrice(r.extracted_price?.toString() || r.price || '0') || 0,
-        url: r.link || r.product_link || '',
-        image: r.thumbnail || '',
-        specs: r.snippet || '',
-        store: storeName,
-      }))
+      .slice(0, 5)
+      .map((r: any) => {
+        const parsed = parsePrice(r.extracted_price?.toString() || r.price || '0')
+        return {
+          name: r.title,
+          name_ar: r.title,
+          price: parsed !== null ? parsed : 0,
+          url: r.link || r.product_link || '',
+          image: r.thumbnail || '',
+          specs: r.snippet || '',
+          store: storeName,
+        }
+      })
       .filter((p: RawProduct) => p.price > 0)
   } catch (err) {
     console.error(`[SerpApi] ${storeName} error:`, err)
@@ -214,7 +228,6 @@ Deno.serve(async (req) => {
     const cacheKey = `${store}:${trimmedQuery}`
     console.log(`[${store}] Query: "${trimmedQuery}"`)
 
-    // Check per-store cache (24h TTL)
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const supabase = createClient(supabaseUrl, supabaseKey)
@@ -236,7 +249,6 @@ Deno.serve(async (req) => {
       )
     }
 
-    // Scrape
     const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     const serpApiKey = Deno.env.get('SERPAPI_API_KEY')
@@ -261,7 +273,6 @@ Deno.serve(async (req) => {
       products = await scrapeWithSerpApi(trimmedQuery, store, serpApiKey)
     }
 
-    // Cache results (even empty ones to avoid re-scraping)
     const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
     await supabase.from('search_cache').insert({
       query: cacheKey,
