@@ -26,20 +26,14 @@ function parsePrice(text: string): number | null {
   return isNaN(num) ? null : num
 }
 
+// TOP 6 CORE STORES ONLY — secondary stores disabled to stop credit burn
 const STORE_CONFIGS: Record<string, { searchUrl: (q: string) => string; method: 'firecrawl' | 'serpapi' }> = {
-  'Noon': { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'Jumia': { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'Amazon Egypt': { searchUrl: () => '', method: 'serpapi' },
+  'Noon': { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'B.TECH': { searchUrl: () => '', method: 'serpapi' },
-  'Dream 2000': { searchUrl: q => `https://dream2000.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
+  'Jumia': { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
   '2B Egypt': { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'Raya Shop': { searchUrl: q => `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'Sigma Computer': { searchUrl: q => `https://sigma-computer.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
   'Tradeline': { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'Mobile Shop': { searchUrl: q => `https://mobileshop-eg.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'ElNekhely': { searchUrl: q => `https://www.elnekhelytechnology.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'Compumarts': { searchUrl: q => `https://compumarts.com/?s=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'Select.eg': { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
 }
 
 const SERPAPI_STORE_FILTERS: Record<string, string> = {
@@ -119,7 +113,10 @@ Only include products that are clearly listed with a price.`,
 
     const extract = data?.data?.extract || data?.extract
     const products = extract?.products || []
-    console.log(`[Firecrawl] ${storeName}: ${products.length} products`)
+    console.log(`[Firecrawl] ${storeName}: RAW response status=${response.status}`)
+    console.log(`[Firecrawl] ${storeName}: RAW extract keys=${JSON.stringify(Object.keys(extract || {}))}`)
+    console.log(`[Firecrawl] ${storeName}: RAW products count=${products.length}`)
+    console.log(`[Firecrawl] ${storeName}: RAW products BEFORE filters=`, JSON.stringify(products.slice(0, 3)))
 
     return products
       .filter((p: any) => p.name && p.price && !isAccessory(p.name))
@@ -176,7 +173,10 @@ async function scrapeWithSerpApi(
     if (!response.ok) return []
 
     const results = data.shopping_results || []
-    console.log(`[SerpApi] ${storeName}: ${results.length} results`)
+    console.log(`[SerpApi] ${storeName}: RAW response status=${response.status}`)
+    console.log(`[SerpApi] ${storeName}: RAW result keys=${JSON.stringify(Object.keys(data))}`)
+    console.log(`[SerpApi] ${storeName}: RAW results count=${results.length}`)
+    console.log(`[SerpApi] ${storeName}: RAW results BEFORE filters=`, JSON.stringify(results.slice(0, 3)))
 
     return results
       .filter((r: any) => r.title && r.price && !isAccessory(r.title))
