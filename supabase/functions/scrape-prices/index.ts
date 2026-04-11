@@ -5,7 +5,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-const CACHE_TTL_HOURS = 24
+const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
 
 interface RawProduct {
