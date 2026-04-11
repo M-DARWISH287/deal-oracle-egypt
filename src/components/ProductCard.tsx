@@ -50,7 +50,15 @@ export function ProductCard({ product, index }: ProductCardProps) {
         </div>
 
         <div className="flex-1 min-w-0">
-          <h3 className="text-lg font-bold text-foreground mb-1">{product.name[lang]}</h3>
+          <h3 className="text-lg font-bold text-foreground mb-1">
+            {product.name[lang]}
+            {product.isRefurbished && (
+              <Badge className="ml-2 bg-orange-100 text-orange-700 border-orange-200 text-xs align-middle">
+                <RefreshCw className="h-3 w-3 mr-1" />
+                {lang === 'ar' ? 'مجدد' : 'Renewed'}
+              </Badge>
+            )}
+          </h3>
           <p className="text-sm text-muted-foreground mb-4">{product.specs[lang]}</p>
 
           <div className="flex items-center gap-2 mb-4">
