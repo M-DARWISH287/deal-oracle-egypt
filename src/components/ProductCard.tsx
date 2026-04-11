@@ -62,10 +62,6 @@ export function ProductCard({ product, index }: ProductCardProps) {
           <p className="text-sm text-muted-foreground mb-4">{product.specs[lang]}</p>
 
           <div className="flex items-center gap-2 mb-4">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-600">
-              <Tag className="h-3.5 w-3.5" />
-              {t('bestPrice')}
-            </span>
             <span className="text-xl font-bold text-foreground">
               {formatPrice(bestPrice.price)} {t('egp')}
             </span>
