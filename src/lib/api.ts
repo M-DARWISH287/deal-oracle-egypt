@@ -89,7 +89,7 @@ export function clientFilter(products: Product[], query: string): Product[] {
 
     // 4. Strict number/model matching
     if (queryNumbers.length > 0) {
-      const nameNumbers = name.match(/\d+/g) || [];
+      const nameNumbers: string[] = name.match(/\d+/g) || [];
       for (const qn of queryNumbers) {
         if (!nameNumbers.includes(qn)) return false;
       }
