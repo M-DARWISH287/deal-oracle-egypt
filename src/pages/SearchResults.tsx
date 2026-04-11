@@ -5,7 +5,7 @@ import { StoreSelector } from '@/components/StoreSelector';
 import { ProductCard } from '@/components/ProductCard';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { useLanguage } from '@/i18n/LanguageContext';
-import { searchStore, groupProducts, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
+import { searchStore, groupProducts, clientFilter, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
 import { Zap, SearchX, CheckCircle2, Loader2 } from 'lucide-react';
 
 const SearchResults = () => {

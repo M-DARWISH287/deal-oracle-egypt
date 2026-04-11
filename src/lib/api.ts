@@ -62,6 +62,38 @@ export async function searchStore(query: string, store: string): Promise<StoreSe
   }
 }
 
+export function clientFilter(products: Product[], query: string): Product[] {
+  const q = query.toLowerCase();
+  const variants = ['pro', 'max', 'plus', 'ultra'] as const;
+
+  return products.filter(p => {
+    // 1. Min price threshold
+    const bestPrice = Math.min(...p.offers.map(o => o.price));
+    if (bestPrice < 1500) return false;
+
+    // 2. Amazon link must be .eg
+    p.offers = p.offers.filter(o => {
+      if (o.store.toLowerCase().includes('amazon') && !o.url.includes('.eg')) return false;
+      return true;
+    });
+    if (p.offers.length === 0) return false;
+
+    // 3. Strict intent filtering
+    const name = p.name.en.toLowerCase();
+    for (const v of variants) {
+      if (!q.includes(v) && name.includes(v)) return false;
+    }
+
+    // 4. Refurbished tagging
+    const refurbWords = ['restored', 'renewed', 'refurbished', 'مجدد'];
+    if (refurbWords.some(w => name.includes(w) || p.name.ar.includes(w))) {
+      p.isRefurbished = true;
+    }
+
+    return true;
+  });
+}
+
 export function groupProducts(allProducts: RawProduct[]): Product[] {
   const grouped: Map<string, Product> = new Map();
 
