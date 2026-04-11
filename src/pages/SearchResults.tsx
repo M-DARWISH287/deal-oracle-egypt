@@ -71,6 +71,7 @@ const SearchResults = () => {
   const isLoading = pendingStores.size > 0;
   const totalStores = ALL_STORES.filter(s => selectedStores.has(s)).length;
   const doneStores = completedStores.size;
+  const displayProducts = clientFilter(products, query);
 
   return (
     <div className="min-h-screen bg-slate-50">
