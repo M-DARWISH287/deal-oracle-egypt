@@ -33,6 +33,7 @@ export interface Product {
   image: string;
   category: string;
   offers: StoreOffer[];
+  isRefurbished?: boolean;
 }
 
 export interface StoreSearchResult {
@@ -102,6 +103,7 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
         image: p.image || '',
         category: 'electronics',
         offers: [{ store: p.store, price: p.price, url: p.url, currency: 'EGP' }],
+        isRefurbished: p.isRefurbished || false,
       });
     }
   }
