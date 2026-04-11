@@ -66,6 +66,9 @@ export function clientFilter(products: Product[], query: string): Product[] {
   const q = query.toLowerCase();
   const variants = ['pro', 'max', 'plus', 'ultra'] as const;
 
+  // Extract numbers from query for strict model matching
+  const queryNumbers = q.match(/\d+/g) || [];
+
   return products.filter(p => {
     // 1. Min price threshold
     const bestPrice = Math.min(...p.offers.map(o => o.price));
@@ -78,17 +81,34 @@ export function clientFilter(products: Product[], query: string): Product[] {
     });
     if (p.offers.length === 0) return false;
 
-    // 3. Strict intent filtering
+    // 3. Strict intent filtering (variants)
     const name = p.name.en.toLowerCase();
     for (const v of variants) {
       if (!q.includes(v) && name.includes(v)) return false;
     }
 
-    // 4. Refurbished tagging
+    // 4. Strict number/model matching
+    if (queryNumbers.length > 0) {
+      const nameNumbers = name.match(/\d+/g) || [];
+      for (const qn of queryNumbers) {
+        if (!nameNumbers.includes(qn)) return false;
+      }
+    }
+
+    // 5. Refurbished tagging
     const refurbWords = ['restored', 'renewed', 'refurbished', 'مجدد'];
     if (refurbWords.some(w => name.includes(w) || p.name.ar.includes(w))) {
       p.isRefurbished = true;
     }
+
+    // 6. De-duplicate offers
+    const seen = new Set<string>();
+    p.offers = p.offers.filter(o => {
+      const key = `${o.store}|${o.price}|${o.url}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
     return true;
   });
