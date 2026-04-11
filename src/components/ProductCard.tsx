@@ -80,6 +80,12 @@ export function ProductCard({ product, index }: ProductCardProps) {
                     : 'bg-secondary hover:bg-secondary/80'
                 }`}
               >
+                {i === 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                    <Tag className="h-2.5 w-2.5" />
+                    {t('bestPrice')}
+                  </span>
+                )}
                 <div className="shrink-0 w-16 h-8 flex items-center justify-center rounded bg-white px-1">
                   <img
                     src={STORE_LOGOS[offer.store] || ''}

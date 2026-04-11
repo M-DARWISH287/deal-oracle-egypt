@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { SearchBar } from '@/components/SearchBar';
 import { StoreSelector } from '@/components/StoreSelector';
 import { ProductCard } from '@/components/ProductCard';
+import { BudgetSlider } from '@/components/BudgetSlider';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { searchStore, groupProducts, clientFilter, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
@@ -19,6 +20,7 @@ const SearchResults = () => {
   const [completedStores, setCompletedStores] = useState<Map<string, { count: number; cached: boolean }>>(new Map());
   const [hasStarted, setHasStarted] = useState(false);
   const [selectedStores, setSelectedStores] = useState<Set<string>>(new Set(ALL_STORES));
+  const [priceRange, setPriceRange] = useState<[number, number]>([0, 999999]);
   const allProductsRef = useRef<RawProduct[]>([]);
 
   const handleSearch = useCallback((newQuery: string) => {
@@ -41,16 +43,25 @@ const SearchResults = () => {
     setCompletedStores(new Map());
     setHasStarted(true);
     allProductsRef.current = [];
+    setPriceRange([0, 999999]);
 
     const storesToSearch = ALL_STORES.filter(s => selectedStores.has(s));
     setPendingStores(new Set(storesToSearch));
 
-    // Send raw query directly to scrapers (bypass AI normalization)
     storesToSearch.forEach((store) => {
       searchStore(query, store).then((result) => {
         if (result.success && result.products.length > 0) {
           allProductsRef.current = [...allProductsRef.current, ...result.products];
-          setProducts(groupProducts(allProductsRef.current));
+          const grouped = groupProducts(allProductsRef.current);
+          setProducts(grouped);
+          // Auto-set price range to full extent
+          const allPrices = grouped.flatMap(p => p.offers.map(o => o.price));
+          if (allPrices.length > 0) {
+            setPriceRange(prev => [
+              Math.min(prev[0], Math.floor(Math.min(...allPrices))),
+              Math.max(prev[1] === 999999 ? 0 : prev[1], Math.ceil(Math.max(...allPrices))),
+            ]);
+          }
           setCompletedStores(prev => new Map(prev).set(store, {
             count: result.products.length,
             cached: result.cached,
@@ -71,7 +82,25 @@ const SearchResults = () => {
   const isLoading = pendingStores.size > 0;
   const totalStores = ALL_STORES.filter(s => selectedStores.has(s)).length;
   const doneStores = completedStores.size;
-  const displayProducts = clientFilter(products, query);
+  const filteredByIntent = clientFilter(products, query);
+
+  // Apply budget slider filter on top of intent filter
+  const displayProducts = useMemo(() => {
+    return filteredByIntent.filter(p => {
+      const best = Math.min(...p.offers.map(o => o.price));
+      return best >= priceRange[0] && best <= priceRange[1];
+    });
+  }, [filteredByIntent, priceRange]);
+
+  // Reset slider range when filtered products change
+  useEffect(() => {
+    if (filteredByIntent.length > 0 && !isLoading) {
+      const prices = filteredByIntent.flatMap(p => p.offers.map(o => o.price));
+      const min = Math.floor(Math.min(...prices));
+      const max = Math.ceil(Math.max(...prices));
+      setPriceRange([min, max]);
+    }
+  }, [filteredByIntent.length, isLoading]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -145,8 +174,17 @@ const SearchResults = () => {
           </div>
         )}
 
+        {/* Budget slider */}
+        {filteredByIntent.length > 0 && !isLoading && (
+          <BudgetSlider
+            products={filteredByIntent}
+            range={priceRange}
+            onChange={setPriceRange}
+          />
+        )}
+
         {/* Product grid */}
-         {displayProducts.length > 0 && (
+        {displayProducts.length > 0 && (
           <div className="space-y-4">
             {displayProducts.map((product, i) => (
               <ProductCard key={product.id} product={product} index={i} />
