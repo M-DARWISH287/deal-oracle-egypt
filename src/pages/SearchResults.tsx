@@ -111,7 +111,7 @@ const SearchResults = () => {
                 <CheckCircle2 className="h-4 w-4" />
                 <span>{lang === 'ar' ? 'اكتمل البحث' : 'Search complete'}</span>
                 <span className="text-muted-foreground">
-                  · {products.length} {lang === 'ar' ? 'منتج' : 'products'}
+                 · {displayProducts.length} {lang === 'ar' ? 'منتج' : 'products'}
                 </span>
               </div>
             )}
@@ -146,16 +146,16 @@ const SearchResults = () => {
         )}
 
         {/* Product grid */}
-        {products.length > 0 && (
+         {displayProducts.length > 0 && (
           <div className="space-y-4">
-            {products.map((product, i) => (
+            {displayProducts.map((product, i) => (
               <ProductCard key={product.id} product={product} index={i} />
             ))}
           </div>
         )}
 
         {/* Empty state */}
-        {!isLoading && hasStarted && products.length === 0 && (
+        {!isLoading && hasStarted && displayProducts.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 text-center space-y-4 animate-fade-in">
             <SearchX className="h-16 w-16 text-muted-foreground/30" />
             <p className="text-lg text-muted-foreground">{t('noResults')}</p>
