@@ -6,6 +6,7 @@ const corsHeaders = {
 }
 
 const CACHE_TTL_HOURS = 24
+const MINIMUM_PRICE_THRESHOLD = 1500
 
 interface RawProduct {
   name: string
@@ -15,18 +16,41 @@ interface RawProduct {
   image?: string
   specs?: string
   store: string
+  isRefurbished?: boolean
 }
 
 function parsePrice(text: string): number | null {
   if (!text) return null
+  // Strip installment keywords before parsing
   const cleaned = text
+    .replace(/شهري[اً]?/g, '')
+    .replace(/قسط/g, '')
+    .replace(/monthly/gi, '')
+    .replace(/\/month/gi, '')
     .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
     .replace(/[^0-9.]/g, '')
   const num = parseFloat(cleaned)
   return isNaN(num) ? null : num
 }
 
-// TOP 6 CORE STORES ONLY — secondary stores disabled to stop credit burn
+function checkRefurbished(name: string): boolean {
+  const lower = name.toLowerCase()
+  return /restored|renewed|refurbished|مجدد/.test(lower)
+}
+
+function matchesIntent(query: string, productName: string): boolean {
+  const q = query.toLowerCase()
+  const n = productName.toLowerCase()
+  const variants = ['pro', 'plus', 'max', 'ultra']
+  for (const v of variants) {
+    if (!q.includes(v) && n.includes(v)) return false
+  }
+  // Also check "+" as alias for "plus"
+  if (!q.includes('+') && !q.includes('plus') && n.includes('+')) return false
+  return true
+}
+
+// TOP 6 CORE STORES ONLY
 const STORE_CONFIGS: Record<string, { searchUrl: (q: string) => string; method: 'firecrawl' | 'serpapi' }> = {
   'Amazon Egypt': { searchUrl: () => '', method: 'serpapi' },
   'Noon': { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
@@ -113,8 +137,6 @@ Only include products that are clearly listed with a price.`,
 
     const extract = data?.data?.extract || data?.extract
     const products = extract?.products || []
-    console.log(`[Firecrawl] ${storeName}: RAW response status=${response.status}`)
-    console.log(`[Firecrawl] ${storeName}: RAW extract keys=${JSON.stringify(Object.keys(extract || {}))}`)
     console.log(`[Firecrawl] ${storeName}: RAW products count=${products.length}`)
     console.log(`[Firecrawl] ${storeName}: RAW products BEFORE filters=`, JSON.stringify(products.slice(0, 3)))
 
@@ -131,9 +153,10 @@ Only include products that are clearly listed with a price.`,
           image: p.image || '',
           specs: p.specs || '',
           store: storeName,
+          isRefurbished: checkRefurbished(p.name),
         }
       })
-      .filter((p: RawProduct) => p.price > 0)
+      .filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       console.error(`[Firecrawl] ${storeName}: timeout after 30s`)
@@ -169,17 +192,27 @@ async function scrapeWithSerpApi(
       signal: controller.signal,
     })
     const data = await response.json()
-    console.log(`[SerpApi] ${storeName}: RAW response status=${response.status}`)
-    console.log(`[SerpApi] ${storeName}: RAW result keys=${JSON.stringify(Object.keys(data))}`)
     console.log(`[SerpApi] ${storeName}: RAW shopping_results count=${(data.shopping_results || []).length}`)
     console.log(`[SerpApi] ${storeName}: RAW first 2 results=`, JSON.stringify((data.shopping_results || []).slice(0, 2)))
     if (data.error) console.error(`[SerpApi] ${storeName}: API error=`, data.error)
     if (!response.ok) return []
 
     const results = data.shopping_results || []
+    const storeDomain = SERPAPI_STORE_FILTERS[storeName]
 
     return results
-      .filter((r: any) => r.title && r.price && !isAccessory(r.title))
+      .filter((r: any) => {
+        if (!r.title || !r.price || isAccessory(r.title)) return false
+        // Validate URL: for store-specific searches, ensure link matches store domain
+        if (storeDomain) {
+          const link = (r.product_link || r.link || '').toLowerCase()
+          if (!link.includes(storeDomain)) {
+            console.log(`[SerpApi] ${storeName}: DROPPED non-store link: ${link}`)
+            return false
+          }
+        }
+        return true
+      })
       .slice(0, 5)
       .map((r: any) => {
         const parsed = parsePrice(r.extracted_price?.toString() || r.price || '0')
@@ -187,13 +220,14 @@ async function scrapeWithSerpApi(
           name: r.title,
           name_ar: r.title,
           price: parsed !== null ? parsed : 0,
-          url: r.link || r.product_link || '',
+          url: r.product_link || r.link || '',
           image: r.thumbnail || '',
           specs: r.snippet || '',
           store: storeName,
+          isRefurbished: checkRefurbished(r.title),
         }
       })
-      .filter((p: RawProduct) => p.price > 0)
+      .filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
     console.error(`[SerpApi] ${storeName} error:`, err)
     return []
@@ -271,6 +305,13 @@ Deno.serve(async (req) => {
         )
       }
       products = await scrapeWithSerpApi(trimmedQuery, store, serpApiKey)
+    }
+
+    // Apply strict intent filtering based on user query
+    const beforeIntentCount = products.length
+    products = products.filter(p => matchesIntent(trimmedQuery, p.name))
+    if (products.length < beforeIntentCount) {
+      console.log(`[${store}] Intent filter: ${beforeIntentCount} -> ${products.length}`)
     }
 
     const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
