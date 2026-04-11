@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { ExternalLink, Copy, Check, Tag } from 'lucide-react';
+import { ExternalLink, Copy, Check, Tag, RefreshCw } from 'lucide-react';
 import { useLanguage } from '@/i18n/LanguageContext';
 import type { Product } from '@/lib/api';
+import { Badge } from '@/components/ui/badge';
 
 const STORE_LOGOS: Record<string, string> = {
   'Amazon Egypt': 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Amazon_logo.svg/200px-Amazon_logo.svg.png',

@@ -16,6 +16,7 @@ export interface RawProduct {
   image?: string;
   specs?: string;
   store: string;
+  isRefurbished?: boolean;
 }
 
 export interface StoreOffer {
