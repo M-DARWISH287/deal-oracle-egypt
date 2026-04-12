@@ -36,11 +36,11 @@ export function ProductCard({ product, index }: ProductCardProps) {
 
   return (
     <div
-      className="rounded-2xl bg-white border border-border p-5 shadow-sm hover:shadow-md transition-shadow opacity-0 animate-fade-in"
+      className="rounded-2xl bg-white border border-border p-3 sm:p-5 shadow-sm hover:shadow-md transition-shadow opacity-0 animate-fade-in overflow-hidden"
       style={{ animationDelay: `${index * 80}ms`, animationFillMode: 'forwards' }}
     >
-      <div className="flex flex-col sm:flex-row gap-5">
-        <div className="shrink-0 flex items-center justify-center w-full sm:w-36 h-36 rounded-xl bg-secondary p-3 overflow-hidden">
+      <div className="flex flex-col sm:flex-row gap-3 sm:gap-5">
+        <div className="shrink-0 flex items-center justify-center w-full sm:w-36 h-32 sm:h-36 rounded-xl bg-secondary p-3 overflow-hidden">
           <img
             src={product.image}
             alt={product.name[lang]}
@@ -50,28 +50,32 @@ export function ProductCard({ product, index }: ProductCardProps) {
         </div>
 
         <div className="flex-1 min-w-0">
-          <h3 className="text-lg font-bold text-foreground mb-1">
+          <h3 className="text-base sm:text-lg font-bold text-foreground mb-1 line-clamp-2 break-words">
             {product.name[lang]}
+          </h3>
+
+          <div className="flex flex-wrap items-center gap-1.5 mb-2">
             {product.isRefurbished && (
-              <Badge className="ml-2 bg-orange-100 text-orange-700 border-orange-200 text-xs align-middle">
+              <Badge className="bg-orange-100 text-orange-700 border-orange-200 text-[10px] sm:text-xs">
                 <RefreshCw className="h-3 w-3 mr-1" />
                 {lang === 'ar' ? 'مجدد' : 'Renewed'}
               </Badge>
             )}
             {product.isVariant && (
-              <Badge className="ml-2 bg-amber-50 text-amber-600 border-amber-200 text-xs align-middle">
+              <Badge className="bg-amber-50 text-amber-600 border-amber-200 text-[10px] sm:text-xs">
                 <Repeat className="h-3 w-3 mr-1" />
                 {lang === 'ar' ? 'نسخة مشابهة' : 'Variant'}
               </Badge>
             )}
-          </h3>
-          <p className="text-sm text-muted-foreground mb-4">{product.specs[lang]}</p>
+          </div>
 
-          <div className="flex items-center gap-2 mb-4">
-            <span className="text-xl font-bold text-foreground">
+          <p className="text-xs sm:text-sm text-muted-foreground mb-3 line-clamp-1 break-words">{product.specs[lang]}</p>
+
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-lg sm:text-xl font-bold text-foreground">
               {formatPrice(bestPrice.price)} {t('egp')}
             </span>
-            <span className="text-sm text-muted-foreground">
+            <span className="text-xs sm:text-sm text-muted-foreground truncate">
               {t('from')} {bestPrice.store}
             </span>
           </div>
@@ -79,20 +83,20 @@ export function ProductCard({ product, index }: ProductCardProps) {
           <div className="space-y-2">
             {sortedOffers.map((offer, i) => (
               <div
-                key={offer.store}
-                className={`flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors ${
+                key={`${offer.store}-${offer.price}-${offer.url}`}
+                className={`flex items-center gap-2 sm:gap-3 rounded-xl px-2.5 sm:px-3 py-2 sm:py-2.5 transition-colors ${
                   i === 0
                     ? 'bg-emerald-50 border border-emerald-200'
                     : 'bg-secondary hover:bg-secondary/80'
                 }`}
               >
                 {i === 0 && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                  <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 shrink-0">
                     <Tag className="h-2.5 w-2.5" />
                     {t('bestPrice')}
                   </span>
                 )}
-                <div className="shrink-0 w-16 h-8 flex items-center justify-center rounded bg-white px-1">
+                <div className="shrink-0 w-12 sm:w-16 h-6 sm:h-8 flex items-center justify-center rounded bg-white px-1 overflow-hidden">
                   <img
                     src={STORE_LOGOS[offer.store] || ''}
                     alt={offer.store}
@@ -100,19 +104,19 @@ export function ProductCard({ product, index }: ProductCardProps) {
                     loading="lazy"
                     onError={(e) => {
                       (e.target as HTMLImageElement).style.display = 'none';
-                      (e.target as HTMLImageElement).parentElement!.innerHTML = `<span class="text-xs text-muted-foreground font-medium">${offer.store}</span>`;
+                      (e.target as HTMLImageElement).parentElement!.innerHTML = `<span class="text-[10px] sm:text-xs text-muted-foreground font-medium truncate">${offer.store}</span>`;
                     }}
                   />
                 </div>
 
-                <span className={`font-bold flex-1 ${i === 0 ? 'text-emerald-600' : 'text-foreground'}`}>
+                <span className={`font-bold text-sm sm:text-base flex-1 min-w-0 truncate ${i === 0 ? 'text-emerald-600' : 'text-foreground'}`}>
                   {formatPrice(offer.price)} {t('egp')}
                 </span>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1 shrink-0">
                   <button
                     onClick={() => copyLink(offer.url)}
-                    className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white transition-colors"
+                    className="inline-flex items-center gap-1 rounded-lg px-1.5 sm:px-2.5 py-1 sm:py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-white transition-colors"
                     title={t('copyLink')}
                   >
                     {copiedUrl === offer.url ? (
@@ -126,7 +130,7 @@ export function ProductCard({ product, index }: ProductCardProps) {
                     href={offer.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    className={`inline-flex items-center gap-1 rounded-lg px-2 sm:px-3 py-1 sm:py-1.5 text-xs font-semibold transition-colors ${
                       i === 0
                         ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
                         : 'bg-purple-50 text-purple-600 hover:bg-purple-100'
