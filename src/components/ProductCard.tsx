@@ -58,6 +58,12 @@ export function ProductCard({ product, index }: ProductCardProps) {
                 {lang === 'ar' ? 'مجدد' : 'Renewed'}
               </Badge>
             )}
+            {product.isVariant && (
+              <Badge className="ml-2 bg-amber-50 text-amber-600 border-amber-200 text-xs align-middle">
+                <Repeat className="h-3 w-3 mr-1" />
+                {lang === 'ar' ? 'نسخة مشابهة' : 'Variant'}
+              </Badge>
+            )}
           </h3>
           <p className="text-sm text-muted-foreground mb-4">{product.specs[lang]}</p>
 
