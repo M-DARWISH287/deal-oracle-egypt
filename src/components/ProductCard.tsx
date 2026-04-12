@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ExternalLink, Copy, Check, Tag, RefreshCw } from 'lucide-react';
+import { ExternalLink, Copy, Check, Tag, RefreshCw, Repeat } from 'lucide-react';
 import { useLanguage } from '@/i18n/LanguageContext';
 import type { Product } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
