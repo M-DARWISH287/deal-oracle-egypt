@@ -6,8 +6,10 @@ import { ProductCard } from '@/components/ProductCard';
 import { BudgetSlider } from '@/components/BudgetSlider';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { useLanguage } from '@/i18n/LanguageContext';
-import { searchStore, groupProducts, clientFilter, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
-import { Zap, SearchX, CheckCircle2, Loader2 } from 'lucide-react';
+import { searchStore, groupProducts, clientFilterWithFallback, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
+import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const SearchResults = () => {
   const [searchParams] = useSearchParams();
@@ -54,7 +56,6 @@ const SearchResults = () => {
           allProductsRef.current = [...allProductsRef.current, ...result.products];
           const grouped = groupProducts(allProductsRef.current);
           setProducts(grouped);
-          // Auto-set price range to full extent
           const allPrices = grouped.flatMap(p => p.offers.map(o => o.price));
           if (allPrices.length > 0) {
             setPriceRange(prev => [
@@ -82,25 +83,39 @@ const SearchResults = () => {
   const isLoading = pendingStores.size > 0;
   const totalStores = ALL_STORES.filter(s => selectedStores.has(s)).length;
   const doneStores = completedStores.size;
-  const filteredByIntent = clientFilter(products, query);
 
-  // Apply budget slider filter on top of intent filter
-  const displayProducts = useMemo(() => {
-    return filteredByIntent.filter(p => {
+  // Smart intent filter with fallback
+  const { displayProducts, isRelaxed } = useMemo(() => {
+    const { strict, relaxed } = clientFilterWithFallback(products, query);
+
+    // Use strict results if available; otherwise fall back to relaxed variants
+    const base = strict.length > 0 ? strict : relaxed;
+    const relaxedMode = strict.length === 0 && relaxed.length > 0;
+
+    // Apply budget slider
+    const filtered = base.filter(p => {
       const best = Math.min(...p.offers.map(o => o.price));
       return best >= priceRange[0] && best <= priceRange[1];
     });
-  }, [filteredByIntent, priceRange]);
 
-  // Reset slider range when filtered products change
+    return { displayProducts: filtered, isRelaxed: relaxedMode };
+  }, [products, query, priceRange]);
+
+  // The products used for the budget slider (before budget filter applied)
+  const sliderProducts = useMemo(() => {
+    const { strict, relaxed } = clientFilterWithFallback(products, query);
+    return strict.length > 0 ? strict : relaxed;
+  }, [products, query]);
+
+  // Reset slider range when products settle
   useEffect(() => {
-    if (filteredByIntent.length > 0 && !isLoading) {
-      const prices = filteredByIntent.flatMap(p => p.offers.map(o => o.price));
+    if (sliderProducts.length > 0 && !isLoading) {
+      const prices = sliderProducts.flatMap(p => p.offers.map(o => o.price));
       const min = Math.floor(Math.min(...prices));
       const max = Math.ceil(Math.max(...prices));
       setPriceRange([min, max]);
     }
-  }, [filteredByIntent.length, isLoading]);
+  }, [sliderProducts.length, isLoading]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -174,10 +189,22 @@ const SearchResults = () => {
           </div>
         )}
 
+        {/* Relaxed intent banner */}
+        {isRelaxed && !isLoading && (
+          <Alert className="border-amber-200 bg-amber-50 animate-fade-in">
+            <AlertTriangle className="h-4 w-4 text-amber-600" />
+            <AlertDescription className="text-amber-800 text-sm font-medium">
+              {lang === 'ar'
+                ? 'النسخة اللي بتدور عليها مش متاحة حالياً، بس دي نسخ مشابهة'
+                : "The exact variant you searched for isn't available right now — here are similar options"}
+            </AlertDescription>
+          </Alert>
+        )}
+
         {/* Budget slider */}
-        {filteredByIntent.length > 0 && !isLoading && (
+        {sliderProducts.length > 0 && !isLoading && (
           <BudgetSlider
-            products={filteredByIntent}
+            products={sliderProducts}
             range={priceRange}
             onChange={setPriceRange}
           />

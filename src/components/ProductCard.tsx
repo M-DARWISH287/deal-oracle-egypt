@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ExternalLink, Copy, Check, Tag, RefreshCw } from 'lucide-react';
+import { ExternalLink, Copy, Check, Tag, RefreshCw, Repeat } from 'lucide-react';
 import { useLanguage } from '@/i18n/LanguageContext';
 import type { Product } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
@@ -56,6 +56,12 @@ export function ProductCard({ product, index }: ProductCardProps) {
               <Badge className="ml-2 bg-orange-100 text-orange-700 border-orange-200 text-xs align-middle">
                 <RefreshCw className="h-3 w-3 mr-1" />
                 {lang === 'ar' ? 'مجدد' : 'Renewed'}
+              </Badge>
+            )}
+            {product.isVariant && (
+              <Badge className="ml-2 bg-amber-50 text-amber-600 border-amber-200 text-xs align-middle">
+                <Repeat className="h-3 w-3 mr-1" />
+                {lang === 'ar' ? 'نسخة مشابهة' : 'Variant'}
               </Badge>
             )}
           </h3>
