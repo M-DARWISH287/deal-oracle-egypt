@@ -17,6 +17,7 @@ const SearchResults = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { t, lang } = useLanguage();
+  const { region } = useRegion();
   const query = searchParams.get('q') || '';
 
   const [products, setProducts] = useState<Product[]>([]);
