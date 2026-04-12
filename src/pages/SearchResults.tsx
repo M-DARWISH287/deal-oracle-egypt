@@ -123,14 +123,15 @@ const SearchResults = () => {
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-50 border-b border-border bg-white/90 backdrop-blur-lg">
-        <div className="mx-auto max-w-4xl flex items-center gap-3 px-4 py-3">
+        <div className="mx-auto max-w-4xl flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2.5 sm:py-3">
           <button onClick={() => navigate('/')} className="flex items-center gap-1.5 shrink-0">
             <Zap className="h-5 w-5 text-purple-500" />
             <span className="text-lg font-bold text-foreground hidden sm:inline">{t('brand')}</span>
           </button>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <SearchBar onSearch={handleSearch} defaultValue={query} />
           </div>
+          <RegionSwitcher />
           <LanguageToggle />
         </div>
       </header>
