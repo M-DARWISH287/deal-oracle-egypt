@@ -275,8 +275,8 @@ Deno.serve(async (req) => {
       .limit(1)
       .single()
 
-    if (cached) {
-      console.log(`[${store}] Cache hit`)
+    if (cached && Array.isArray(cached.results) && cached.results.length > 0) {
+      console.log(`[${store}] Cache hit (${cached.results.length} products)`)
       return new Response(
         JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -314,12 +314,15 @@ Deno.serve(async (req) => {
       console.log(`[${store}] Intent filter: ${beforeIntentCount} -> ${products.length}`)
     }
 
-    const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
-    await supabase.from('search_cache').insert({
-      query: cacheKey,
-      results: products as any,
-      expires_at: expiresAt,
-    })
+    // Only cache non-empty results to prevent cache poisoning
+    if (products.length > 0) {
+      const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
+      await supabase.from('search_cache').insert({
+        query: cacheKey,
+        results: products as any,
+        expires_at: expiresAt,
+      })
+    }
 
     console.log(`[${store}] Returning ${products.length} products`)
     return new Response(

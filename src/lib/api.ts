@@ -87,10 +87,16 @@ export function clientFilterWithFallback(
     const bestPrice = Math.min(...clone.offers.map(o => o.price));
     if (bestPrice < 1500) continue;
 
-    // 2. Amazon link must be .eg
+    // 2. Domain whitelist — only keep offers from known Egyptian stores
+    const WHITELISTED_DOMAINS = [
+      'amazon.eg', 'noon.com', 'jumia.com.eg', 'btech.com',
+      '2b.com.eg', 'tradeline.com.eg', 'raya.com',
+    ];
     clone.offers = clone.offers.filter(o => {
-      if (o.store.toLowerCase().includes('amazon') && !o.url.includes('.eg')) return false;
-      return true;
+      try {
+        const hostname = new URL(o.url).hostname;
+        return WHITELISTED_DOMAINS.some(d => hostname === d || hostname.endsWith(`.${d}`));
+      } catch { return false; }
     });
     if (clone.offers.length === 0) continue;
 

@@ -1,0 +1,1 @@
+DELETE FROM search_cache WHERE results::text = '[]' OR results IS NULL;
