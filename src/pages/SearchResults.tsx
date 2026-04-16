@@ -134,6 +134,7 @@ const SearchResults = () => {
           <div className="flex-1 min-w-0">
             <SearchBar onSearch={handleSearch} defaultValue={query} />
           </div>
+          <UserMenu />
           <RegionSwitcher />
           <LanguageToggle />
         </div>
