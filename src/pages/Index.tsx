@@ -2,13 +2,12 @@ import { useNavigate } from 'react-router-dom';
 import { SearchBar } from '@/components/SearchBar';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
-import { UserMenu } from '@/components/UserMenu';
 import { useLanguage } from '@/i18n/LanguageContext';
-import { Sparkles, Zap } from 'lucide-react';
+import { Zap, Sparkles } from 'lucide-react';
 
 const trendingSearches = {
-  ar: ['آيفون 15', 'سامسونج S24', 'ماك بوك', 'إيربودز', 'بلايستيشن 5', 'شاشة سامسونج', 'لابتوب ديل'],
-  en: ['iPhone 15', 'Samsung S24', 'MacBook', 'AirPods', 'PlayStation 5', 'Samsung TV', 'Dell Laptop'],
+  ar: ['آيفون 15', 'سامسونج S24', 'ماك بوك', 'إيربودز', 'بلايستيشن 5'],
+  en: ['iPhone 15', 'Samsung S24', 'MacBook', 'AirPods', 'PlayStation 5'],
 };
 
 const Index = () => {
@@ -22,7 +21,6 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-white flex flex-col">
       <header className="flex items-center justify-end gap-2 px-3 sm:px-4 py-3">
-        <UserMenu />
         <RegionSwitcher />
         <LanguageToggle />
       </header>
@@ -32,9 +30,7 @@ const Index = () => {
           <div className="space-y-3 animate-fade-in">
             <div className="flex items-center justify-center gap-2">
               <Zap className="h-7 w-7 sm:h-8 sm:w-8 text-purple-500" />
-              <h1 className="text-3xl sm:text-5xl font-bold text-foreground">
-                {t('brand')}
-              </h1>
+              <h1 className="text-3xl sm:text-5xl font-bold text-foreground">{t('brand')}</h1>
             </div>
             <p className="text-muted-foreground text-sm sm:text-lg px-2">{t('tagline')}</p>
           </div>
