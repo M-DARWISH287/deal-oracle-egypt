@@ -100,7 +100,7 @@ export function clientFilterWithFallback(
       if (!q.includes(v) && name.includes(v)) { passesIntent = false; break; }
     }
     if (passesIntent && queryNumbers.length > 0) {
-      const nameNumbers = name.match(/\d+/g) || [];
+      const nameNumbers: string[] = name.match(/\d+/g) || [];
       for (const qn of queryNumbers) {
         if (!nameNumbers.includes(qn)) { passesIntent = false; break; }
       }
