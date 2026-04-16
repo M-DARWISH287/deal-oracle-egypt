@@ -81,8 +81,10 @@ const SearchResults = () => {
           const next = new Set(prev);
           next.delete(store);
           return next;
-        });
       });
+    });
+    // Refresh credits after all stores complete
+    Promise.allSettled(storesToSearch.map(s => searchStore(query, s, user?.id))).then(() => refreshCredits());
     });
   }, [query, selectedStores]);
 
