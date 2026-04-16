@@ -1,14 +1,13 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { SearchBar } from '@/components/SearchBar';
-import { StoreSelector } from '@/components/StoreSelector';
 import { ProductCard } from '@/components/ProductCard';
 import { BudgetSlider } from '@/components/BudgetSlider';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { searchStore, groupProducts, clientFilterWithFallback, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
+import { searchStore, groupProducts, clientFilterWithFallback, getRelevantStores, type RawProduct, type Product } from '@/lib/api';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
@@ -23,33 +22,26 @@ const SearchResults = () => {
   const [pendingStores, setPendingStores] = useState<Set<string>>(new Set());
   const [completedStores, setCompletedStores] = useState<Map<string, { count: number; cached: boolean }>>(new Map());
   const [hasStarted, setHasStarted] = useState(false);
-  const [selectedStores, setSelectedStores] = useState<Set<string>>(new Set(ALL_STORES));
   const [priceRange, setPriceRange] = useState<[number, number]>([0, 999999]);
+  const [activeStores, setActiveStores] = useState<string[]>([]);
   const allProductsRef = useRef<RawProduct[]>([]);
 
   const handleSearch = useCallback((newQuery: string) => {
     navigate(`/search?q=${encodeURIComponent(newQuery)}`);
   }, [navigate]);
 
-  const toggleStore = useCallback((store: string) => {
-    setSelectedStores(prev => {
-      const next = new Set(prev);
-      if (next.has(store)) next.delete(store);
-      else next.add(store);
-      return next;
-    });
-  }, []);
-
   useEffect(() => {
     if (!query) return;
+
+    // Smart routing: only search relevant stores
+    const storesToSearch = getRelevantStores(query);
+    setActiveStores(storesToSearch);
 
     setProducts([]);
     setCompletedStores(new Map());
     setHasStarted(true);
     allProductsRef.current = [];
     setPriceRange([0, 999999]);
-
-    const storesToSearch = ALL_STORES.filter(s => selectedStores.has(s));
     setPendingStores(new Set(storesToSearch));
 
     storesToSearch.forEach((store) => {
@@ -79,10 +71,10 @@ const SearchResults = () => {
         });
       });
     });
-  }, [query, selectedStores]);
+  }, [query]);
 
   const isLoading = pendingStores.size > 0;
-  const totalStores = ALL_STORES.filter(s => selectedStores.has(s)).length;
+  const totalStores = activeStores.length;
   const doneStores = completedStores.size;
 
   const { displayProducts, isRelaxed } = useMemo(() => {
@@ -125,8 +117,6 @@ const SearchResults = () => {
       </header>
 
       <main className="mx-auto max-w-4xl px-4 py-4 space-y-4">
-        <StoreSelector selectedStores={selectedStores} onToggle={toggleStore} />
-
         {hasStarted && (
           <div className="flex items-center gap-3 text-sm animate-fade-in">
             {isLoading ? (
@@ -153,9 +143,10 @@ const SearchResults = () => {
           </div>
         )}
 
+        {/* Only show chips for dynamically selected stores */}
         {hasStarted && (
           <div className="flex flex-wrap gap-1.5 animate-fade-in">
-            {ALL_STORES.filter(s => selectedStores.has(s)).map((store) => {
+            {activeStores.map((store) => {
               const done = completedStores.get(store);
               const isPending = pendingStores.has(store);
               return (

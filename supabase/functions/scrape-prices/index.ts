@@ -21,24 +21,29 @@ interface StoreConfig {
   tier: 1 | 2 | 3;
 }
 
-// ── 13 STORES with Priority Tiers ──
+// ── 17 STORES ──
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // Tier 1 — Primary
-  'Amazon Egypt':  { searchUrl: () => '', method: 'serpapi', tier: 1 },
-  'Noon':          { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'B.TECH':        { searchUrl: () => '', method: 'serpapi', tier: 1 },
-  'Jumia':         { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  // Tier 2 — Secondary
-  '2B Egypt':      { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Tradeline':     { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Raya':          { searchUrl: q => `https://rfrsh.me/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // Tier 3 — Tertiary
-  'Select.eg':     { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Compumarts':    { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'ElNekhely':     { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Sigma':         { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Mobile Shop':   { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Dream 2000':    { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  // GENERAL
+  'Amazon Egypt':      { searchUrl: () => '', method: 'serpapi', tier: 1 },
+  'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'B.TECH':            { searchUrl: () => '', method: 'serpapi', tier: 1 },
+  'Jumia':             { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'RayaShop':          { searchUrl: q => `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  // APPLE_ONLY
+  'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  // PC_HARDWARE
+  'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  // MOBILE_ONLY
+  'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Select.eg':         { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
 }
 
 const SERPAPI_STORE_FILTERS: Record<string, string> = {
@@ -159,7 +164,7 @@ async function scrapeWithSerpApi(query: string, storeName: string, serpApiKey: s
   finally { clearTimeout(timeout) }
 }
 
-// ── Credit helpers (stateless: open connection → single RPC → close) ──
+// ── Credit helpers (stateless) ──
 async function reserveCredits(supabaseUrl: string, serviceKey: string, userId: string, store: string, query: string): Promise<string | null> {
   const sb = createClient(supabaseUrl, serviceKey)
   try {
@@ -198,7 +203,7 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
-    // ── Check cache (stateless: create client, query, done) ──
+    // ── Check cache (stateless) ──
     const cacheClient = createClient(supabaseUrl, supabaseKey)
     const { data: cached } = await cacheClient
       .from('search_cache').select('results, created_at')
@@ -210,7 +215,7 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // ── Reserve 1 credit if user is authenticated ──
+    // ── Reserve 1 credit if authenticated ──
     let txId: string | null = null
     if (user_id) {
       txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
@@ -234,12 +239,11 @@ Deno.serve(async (req) => {
         products = await scrapeWithSerpApi(trimmedQuery, store, serpApiKey)
       }
     } catch (scrapeErr) {
-      // Refund credit on scrape failure
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
       return new Response(JSON.stringify({ success: false, error: String(scrapeErr), store }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // ── Settle credits: 1 if results, 0 (full refund) if empty ──
+    // ── Settle credits ──
     if (txId) {
       await settleCredits(supabaseUrl, supabaseKey, txId, products.length > 0 ? 1 : 0)
     }
@@ -249,11 +253,14 @@ Deno.serve(async (req) => {
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
     if (products.length < beforeCount) console.log(`[${store}] Intent: ${beforeCount} -> ${products.length}`)
 
-    // Cache only non-empty
+    // ── UPSERT cache (self-cleaning, prevents DB bloat) ──
     if (products.length > 0) {
       const writeClient = createClient(supabaseUrl, supabaseKey)
       const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
-      await writeClient.from('search_cache').insert({ query: cacheKey, results: products as any, expires_at: expiresAt })
+      await writeClient.from('search_cache').upsert(
+        { query: cacheKey, results: products as any, expires_at: expiresAt, created_at: new Date().toISOString() },
+        { onConflict: 'query' }
+      )
     }
 
     console.log(`[${store}] Returning ${products.length} products`)
