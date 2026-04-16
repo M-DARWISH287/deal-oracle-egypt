@@ -6,8 +6,10 @@ import { ProductCard } from '@/components/ProductCard';
 import { BudgetSlider } from '@/components/BudgetSlider';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
+import { UserMenu } from '@/components/UserMenu';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useRegion } from '@/i18n/RegionContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { searchStore, groupProducts, clientFilterWithFallback, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -18,6 +20,7 @@ const SearchResults = () => {
   const navigate = useNavigate();
   const { t, lang } = useLanguage();
   const { region } = useRegion();
+  const { user, refreshCredits } = useAuth();
   const query = searchParams.get('q') || '';
 
   const [products, setProducts] = useState<Product[]>([]);
@@ -54,7 +57,7 @@ const SearchResults = () => {
     setPendingStores(new Set(storesToSearch));
 
     storesToSearch.forEach((store) => {
-      searchStore(query, store).then((result) => {
+      searchStore(query, store, user?.id).then((result) => {
         if (result.success && result.products.length > 0) {
           allProductsRef.current = [...allProductsRef.current, ...result.products];
           const grouped = groupProducts(allProductsRef.current);
@@ -78,8 +81,8 @@ const SearchResults = () => {
           const next = new Set(prev);
           next.delete(store);
           return next;
-        });
       });
+    });
     });
   }, [query, selectedStores]);
 
@@ -120,6 +123,11 @@ const SearchResults = () => {
     }
   }, [sliderProducts.length, isLoading]);
 
+  // Refresh credit balance when search completes
+  useEffect(() => {
+    if (!isLoading && hasStarted && user) refreshCredits();
+  }, [isLoading, hasStarted, user]);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-50 border-b border-border bg-white/90 backdrop-blur-lg">
@@ -131,6 +139,7 @@ const SearchResults = () => {
           <div className="flex-1 min-w-0">
             <SearchBar onSearch={handleSearch} defaultValue={query} />
           </div>
+          <UserMenu />
           <RegionSwitcher />
           <LanguageToggle />
         </div>

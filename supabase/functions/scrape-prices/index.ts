@@ -7,62 +7,67 @@ const corsHeaders = {
 
 const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
+const STORE_TIMEOUT_MS = 15000
 
+// ── Types ──
 interface RawProduct {
-  name: string
-  name_ar?: string
-  price: number | string
-  url: string
-  image?: string
-  specs?: string
-  store: string
-  isRefurbished?: boolean
+  name: string; name_ar?: string; price: number | string;
+  url: string; image?: string; specs?: string; store: string; isRefurbished?: boolean;
 }
 
+interface StoreConfig {
+  searchUrl: (q: string) => string;
+  method: 'firecrawl' | 'serpapi';
+  tier: 1 | 2 | 3;
+}
+
+// ── 13 STORES with Priority Tiers ──
+const STORE_CONFIGS: Record<string, StoreConfig> = {
+  // Tier 1 — Primary
+  'Amazon Egypt':  { searchUrl: () => '', method: 'serpapi', tier: 1 },
+  'Noon':          { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'B.TECH':        { searchUrl: () => '', method: 'serpapi', tier: 1 },
+  'Jumia':         { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  // Tier 2 — Secondary
+  '2B Egypt':      { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Tradeline':     { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Raya':          { searchUrl: q => `https://rfrsh.me/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  // Tier 3 — Tertiary
+  'Select.eg':     { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Compumarts':    { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'ElNekhely':     { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Sigma':         { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Mobile Shop':   { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Dream 2000':    { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+}
+
+const SERPAPI_STORE_FILTERS: Record<string, string> = {
+  'Amazon Egypt': 'amazon.eg',
+  'B.TECH': 'btech.com',
+}
+
+// ── Helpers ──
 function parsePrice(text: string): number | null {
   if (!text) return null
-  // Strip installment keywords before parsing
   const cleaned = text
-    .replace(/شهري[اً]?/g, '')
-    .replace(/قسط/g, '')
-    .replace(/monthly/gi, '')
-    .replace(/\/month/gi, '')
-    .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/شهري[اً]?|قسط|monthly|\/month/gi, '')
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
     .replace(/[^0-9.]/g, '')
   const num = parseFloat(cleaned)
   return isNaN(num) ? null : num
 }
 
 function checkRefurbished(name: string): boolean {
-  const lower = name.toLowerCase()
-  return /restored|renewed|refurbished|مجدد/.test(lower)
+  return /restored|renewed|refurbished|مجدد/i.test(name)
 }
 
 function matchesIntent(query: string, productName: string): boolean {
-  const q = query.toLowerCase()
-  const n = productName.toLowerCase()
-  const variants = ['pro', 'plus', 'max', 'ultra']
-  for (const v of variants) {
+  const q = query.toLowerCase(); const n = productName.toLowerCase()
+  for (const v of ['pro', 'plus', 'max', 'ultra']) {
     if (!q.includes(v) && n.includes(v)) return false
   }
-  // Also check "+" as alias for "plus"
   if (!q.includes('+') && !q.includes('plus') && n.includes('+')) return false
   return true
-}
-
-// TOP 6 CORE STORES ONLY
-const STORE_CONFIGS: Record<string, { searchUrl: (q: string) => string; method: 'firecrawl' | 'serpapi' }> = {
-  'Amazon Egypt': { searchUrl: () => '', method: 'serpapi' },
-  'Noon': { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'B.TECH': { searchUrl: () => '', method: 'serpapi' },
-  'Jumia': { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  '2B Egypt': { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-  'Tradeline': { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl' },
-}
-
-const SERPAPI_STORE_FILTERS: Record<string, string> = {
-  'Amazon Egypt': 'amazon.eg',
-  'B.TECH': 'btech.com',
 }
 
 const ACCESSORY_KEYWORDS = [
@@ -77,41 +82,28 @@ function isAccessory(name: string): boolean {
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
 
-async function scrapeWithFirecrawl(
-  query: string,
-  storeName: string,
-  searchUrl: string,
-  firecrawlKey: string
-): Promise<RawProduct[]> {
+// ── Scraper: Firecrawl ──
+async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 30000)
-
+  const timeout = setTimeout(() => controller.abort(), STORE_TIMEOUT_MS)
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Authorization': `Bearer ${firecrawlKey}`, 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        url: searchUrl,
-        formats: ['extract'],
+        url: searchUrl, formats: ['extract'],
         extract: {
           schema: {
             type: 'object',
             properties: {
               products: {
-                type: 'array',
-                items: {
+                type: 'array', items: {
                   type: 'object',
                   properties: {
-                    name: { type: 'string', description: 'Full product name/title' },
-                    name_ar: { type: 'string', description: 'Product name in Arabic if available' },
-                    price: { type: 'string', description: 'Price as displayed on the page, including currency' },
-                    url: { type: 'string', description: 'Direct product page URL (full absolute URL)' },
-                    image: { type: 'string', description: 'Product image URL (full absolute URL)' },
-                    specs: { type: 'string', description: 'Brief product specifications or description' },
+                    name: { type: 'string' }, name_ar: { type: 'string' },
+                    price: { type: 'string' }, url: { type: 'string' },
+                    image: { type: 'string' }, specs: { type: 'string' },
                   },
                   required: ['name', 'price', 'url'],
                 },
@@ -119,221 +111,155 @@ async function scrapeWithFirecrawl(
             },
             required: ['products'],
           },
-          prompt: `Extract the top 5 product listings from this ${storeName} search results page for the query "${query}". 
-IMPORTANT: Only extract ACTUAL products matching the search query. 
-DO NOT include accessories like cases, covers, screen protectors, cables, chargers, adapters, holders, or any peripheral items.
-For each product extract: full product name, price as shown on page, direct product page URL, product image URL, and brief specs.
-Only include products that are clearly listed with a price.`,
+          prompt: `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products, no accessories.`,
         },
         waitFor: 5000,
       }),
     })
-
     const data = await response.json()
-    if (!response.ok) {
-      console.error(`[Firecrawl] ${storeName} error:`, data)
-      return []
-    }
-
-    const extract = data?.data?.extract || data?.extract
-    const products = extract?.products || []
-    console.log(`[Firecrawl] ${storeName}: RAW products count=${products.length}`)
-    console.log(`[Firecrawl] ${storeName}: RAW products BEFORE filters=`, JSON.stringify(products.slice(0, 3)))
-
-    return products
-      .filter((p: any) => p.name && p.price && !isAccessory(p.name))
-      .slice(0, 5)
-      .map((p: any) => {
-        const parsed = parsePrice(String(p.price))
-        return {
-          name: p.name,
-          name_ar: p.name_ar || p.name,
-          price: parsed !== null ? parsed : 0,
-          url: p.url,
-          image: p.image || '',
-          specs: p.specs || '',
-          store: storeName,
-          isRefurbished: checkRefurbished(p.name),
-        }
-      })
-      .filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
+    if (!response.ok) { console.error(`[Firecrawl] ${storeName} error:`, data); return [] }
+    const products = data?.data?.extract?.products || data?.extract?.products || []
+    console.log(`[Firecrawl] ${storeName}: ${products.length} raw products`)
+    return products.filter((p: any) => p.name && p.price && !isAccessory(p.name)).slice(0, 5).map((p: any) => {
+      const parsed = parsePrice(String(p.price))
+      return { name: p.name, name_ar: p.name_ar || p.name, price: parsed ?? 0, url: p.url, image: p.image || '', specs: p.specs || '', store: storeName, isRefurbished: checkRefurbished(p.name) }
+    }).filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      console.error(`[Firecrawl] ${storeName}: timeout after 30s`)
-    } else {
-      console.error(`[Firecrawl] ${storeName} error:`, err)
-    }
+    console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
     return []
-  } finally {
-    clearTimeout(timeout)
-  }
+  } finally { clearTimeout(timeout) }
 }
 
-async function scrapeWithSerpApi(
-  query: string,
-  storeName: string,
-  serpApiKey: string
-): Promise<RawProduct[]> {
+// ── Scraper: SerpApi ──
+async function scrapeWithSerpApi(query: string, storeName: string, serpApiKey: string): Promise<RawProduct[]> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 15000)
-
+  const timeout = setTimeout(() => controller.abort(), STORE_TIMEOUT_MS)
   try {
     const storeFilter = SERPAPI_STORE_FILTERS[storeName] || ''
     const searchQuery = storeFilter ? `${query} ${storeFilter}` : query
-    const params = new URLSearchParams({
-      engine: 'google_shopping',
-      q: searchQuery,
-      hl: 'en',
-      num: '10',
-      api_key: serpApiKey,
-    })
-
-    const response = await fetch(`https://serpapi.com/search.json?${params}`, {
-      signal: controller.signal,
-    })
+    const params = new URLSearchParams({ engine: 'google_shopping', q: searchQuery, hl: 'en', num: '10', api_key: serpApiKey })
+    const response = await fetch(`https://serpapi.com/search.json?${params}`, { signal: controller.signal })
     const data = await response.json()
-    console.log(`[SerpApi] ${storeName}: RAW shopping_results count=${(data.shopping_results || []).length}`)
-    console.log(`[SerpApi] ${storeName}: RAW first 2 results=`, JSON.stringify((data.shopping_results || []).slice(0, 2)))
-    if (data.error) console.error(`[SerpApi] ${storeName}: API error=`, data.error)
+    console.log(`[SerpApi] ${storeName}: ${(data.shopping_results || []).length} raw results`)
     if (!response.ok) return []
-
     const results = data.shopping_results || []
     const storeDomain = SERPAPI_STORE_FILTERS[storeName]
-
-    return results
-      .filter((r: any) => {
-        if (!r.title || !r.price || isAccessory(r.title)) return false
-        // Validate URL: for store-specific searches, ensure link matches store domain
-        if (storeDomain) {
-          const link = (r.product_link || r.link || '').toLowerCase()
-          if (!link.includes(storeDomain)) {
-            console.log(`[SerpApi] ${storeName}: DROPPED non-store link: ${link}`)
-            return false
-          }
-        }
-        return true
-      })
-      .slice(0, 5)
-      .map((r: any) => {
-        const parsed = parsePrice(r.extracted_price?.toString() || r.price || '0')
-        return {
-          name: r.title,
-          name_ar: r.title,
-          price: parsed !== null ? parsed : 0,
-          url: r.product_link || r.link || '',
-          image: r.thumbnail || '',
-          specs: r.snippet || '',
-          store: storeName,
-          isRefurbished: checkRefurbished(r.title),
-        }
-      })
-      .filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
-  } catch (err) {
-    console.error(`[SerpApi] ${storeName} error:`, err)
-    return []
-  } finally {
-    clearTimeout(timeout)
-  }
+    return results.filter((r: any) => {
+      if (!r.title || !r.price || isAccessory(r.title)) return false
+      if (storeDomain) {
+        const link = (r.product_link || r.link || '').toLowerCase()
+        if (!link.includes(storeDomain)) return false
+      }
+      return true
+    }).slice(0, 5).map((r: any) => {
+      const parsed = parsePrice(r.extracted_price?.toString() || r.price || '0')
+      return { name: r.title, name_ar: r.title, price: parsed ?? 0, url: r.product_link || r.link || '', image: r.thumbnail || '', specs: r.snippet || '', store: storeName, isRefurbished: checkRefurbished(r.title) }
+    }).filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
+  } catch (err) { console.error(`[SerpApi] ${storeName}:`, err); return [] }
+  finally { clearTimeout(timeout) }
 }
 
+// ── Credit helpers (stateless: open connection → single RPC → close) ──
+async function reserveCredits(supabaseUrl: string, serviceKey: string, userId: string, store: string, query: string): Promise<string | null> {
+  const sb = createClient(supabaseUrl, serviceKey)
+  try {
+    const { data, error } = await sb.rpc('reserve_credits', { p_user_id: userId, p_amount: 1, p_store: store, p_query: query })
+    if (error) { console.error('[Credits] Reserve failed:', error.message); return null }
+    return data as string
+  } catch (err) { console.error('[Credits] Reserve error:', err); return null }
+}
+
+async function settleCredits(supabaseUrl: string, serviceKey: string, txId: string, actualCost: number): Promise<void> {
+  const sb = createClient(supabaseUrl, serviceKey)
+  try {
+    const { error } = await sb.rpc('settle_credits', { p_tx_id: txId, p_actual_cost: actualCost })
+    if (error) console.error('[Credits] Settle failed:', error.message)
+  } catch (err) { console.error('[Credits] Settle error:', err) }
+}
+
+// ── Main Handler ──
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders })
-  }
+  if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
 
   try {
-    const { query, store } = await req.json()
+    const { query, store, user_id } = await req.json()
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Query is required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
+      return new Response(JSON.stringify({ success: false, error: 'Query is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
-
-    if (!store || typeof store !== 'string' || !STORE_CONFIGS[store]) {
-      return new Response(
-        JSON.stringify({ success: false, error: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}` }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
+    if (!store || !STORE_CONFIGS[store]) {
+      return new Response(JSON.stringify({ success: false, error: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}` }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
     const trimmedQuery = query.trim().toLowerCase()
     const cacheKey = `${store}:${trimmedQuery}`
-    console.log(`[${store}] Query: "${trimmedQuery}"`)
+    console.log(`[${store}] Query: "${trimmedQuery}" user=${user_id || 'anon'}`)
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const supabase = createClient(supabaseUrl, supabaseKey)
 
-    const { data: cached } = await supabase
-      .from('search_cache')
-      .select('results, created_at')
-      .eq('query', cacheKey)
-      .gt('expires_at', new Date().toISOString())
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single()
+    // ── Check cache (stateless: create client, query, done) ──
+    const cacheClient = createClient(supabaseUrl, supabaseKey)
+    const { data: cached } = await cacheClient
+      .from('search_cache').select('results, created_at')
+      .eq('query', cacheKey).gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false }).limit(1).single()
 
     if (cached && Array.isArray(cached.results) && cached.results.length > 0) {
       console.log(`[${store}] Cache hit (${cached.results.length} products)`)
-      return new Response(
-        JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
+      return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
+    // ── Reserve 1 credit if user is authenticated ──
+    let txId: string | null = null
+    if (user_id) {
+      txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
+      if (!txId) {
+        return new Response(JSON.stringify({ success: false, error: 'Insufficient credits' }), { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      }
+    }
+
+    // ── Scrape ──
     const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     const serpApiKey = Deno.env.get('SERPAPI_API_KEY')
-
     let products: RawProduct[] = []
 
-    if (config.method === 'firecrawl') {
-      if (!firecrawlKey) {
-        return new Response(
-          JSON.stringify({ success: false, error: 'Firecrawl not configured', store }),
-          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        )
+    try {
+      if (config.method === 'firecrawl') {
+        if (!firecrawlKey) throw new Error('Firecrawl not configured')
+        products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
+      } else {
+        if (!serpApiKey) throw new Error('SerpApi not configured')
+        products = await scrapeWithSerpApi(trimmedQuery, store, serpApiKey)
       }
-      products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
-    } else if (config.method === 'serpapi') {
-      if (!serpApiKey) {
-        return new Response(
-          JSON.stringify({ success: false, error: 'SerpApi not configured', store }),
-          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        )
-      }
-      products = await scrapeWithSerpApi(trimmedQuery, store, serpApiKey)
+    } catch (scrapeErr) {
+      // Refund credit on scrape failure
+      if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
+      return new Response(JSON.stringify({ success: false, error: String(scrapeErr), store }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // Apply strict intent filtering based on user query
-    const beforeIntentCount = products.length
+    // ── Settle credits: 1 if results, 0 (full refund) if empty ──
+    if (txId) {
+      await settleCredits(supabaseUrl, supabaseKey, txId, products.length > 0 ? 1 : 0)
+    }
+
+    // Intent filter
+    const beforeCount = products.length
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
-    if (products.length < beforeIntentCount) {
-      console.log(`[${store}] Intent filter: ${beforeIntentCount} -> ${products.length}`)
-    }
+    if (products.length < beforeCount) console.log(`[${store}] Intent: ${beforeCount} -> ${products.length}`)
 
-    // Only cache non-empty results to prevent cache poisoning
+    // Cache only non-empty
     if (products.length > 0) {
+      const writeClient = createClient(supabaseUrl, supabaseKey)
       const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
-      await supabase.from('search_cache').insert({
-        query: cacheKey,
-        results: products as any,
-        expires_at: expiresAt,
-      })
+      await writeClient.from('search_cache').insert({ query: cacheKey, results: products as any, expires_at: expiresAt })
     }
 
     console.log(`[${store}] Returning ${products.length} products`)
-    return new Response(
-      JSON.stringify({ success: true, products, cached: false, store }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    return new Response(JSON.stringify({ success: true, products, cached: false, store }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
-    return new Response(
-      JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    return new Response(JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   }
 })

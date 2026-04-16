@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { SearchBar } from '@/components/SearchBar';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
+import { UserMenu } from '@/components/UserMenu';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { Sparkles, Zap } from 'lucide-react';
 
@@ -21,6 +22,7 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-white flex flex-col">
       <header className="flex items-center justify-end gap-2 px-3 sm:px-4 py-3">
+        <UserMenu />
         <RegionSwitcher />
         <LanguageToggle />
       </header>

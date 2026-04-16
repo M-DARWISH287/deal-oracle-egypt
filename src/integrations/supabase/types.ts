@@ -14,6 +14,72 @@ export type Database = {
   }
   public: {
     Tables: {
+      credit_transactions: {
+        Row: {
+          amount: number
+          created_at: string
+          id: string
+          query: string | null
+          status: string
+          store: string | null
+          type: string
+          user_id: string
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          id?: string
+          query?: string | null
+          status?: string
+          store?: string | null
+          type: string
+          user_id: string
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          id?: string
+          query?: string | null
+          status?: string
+          store?: string | null
+          type?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          avatar_url: string | null
+          created_at: string
+          credit_balance: number
+          display_name: string | null
+          id: string
+          region: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          avatar_url?: string | null
+          created_at?: string
+          credit_balance?: number
+          display_name?: string | null
+          id?: string
+          region?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          avatar_url?: string | null
+          created_at?: string
+          credit_balance?: number
+          display_name?: string | null
+          id?: string
+          region?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       search_cache: {
         Row: {
           created_at: string
@@ -43,7 +109,19 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      reserve_credits: {
+        Args: {
+          p_amount: number
+          p_query?: string
+          p_store?: string
+          p_user_id: string
+        }
+        Returns: string
+      }
+      settle_credits: {
+        Args: { p_actual_cost: number; p_tx_id: string }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
