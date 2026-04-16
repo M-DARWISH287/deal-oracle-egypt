@@ -1,22 +1,47 @@
 import { supabase } from '@/integrations/supabase/client';
 
-// ALL 13 STORES — 3 tiers
+// ALL 17 STORES — 4 categories
 export const ALL_STORES = [
-  // Tier 1
-  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia',
-  // Tier 2
-  '2B Egypt', 'Tradeline', 'Raya',
-  // Tier 3
-  'Select.eg', 'Compumarts', 'ElNekhely', 'Sigma', 'Mobile Shop', 'Dream 2000',
+  // GENERAL (always searched)
+  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', '2B Egypt', 'RayaShop',
+  // APPLE_ONLY
+  'Tradeline', 'iShop', 'Switch Plus',
+  // PC_HARDWARE
+  'Sigma', 'ElNekhely', 'Compumarts', 'Maximum Hardware',
+  // MOBILE_ONLY
+  'Dream 2000', 'Select.eg', 'Mobile Shop', 'Dubai Phone',
 ] as const;
 
-export const STORE_TIERS: Record<string, 1 | 2 | 3> = {
-  'Amazon Egypt': 1, 'Noon': 1, 'B.TECH': 1, 'Jumia': 1,
-  '2B Egypt': 2, 'Tradeline': 2, 'Raya': 2,
-  'Select.eg': 3, 'Compumarts': 3, 'ElNekhely': 3, 'Sigma': 3, 'Mobile Shop': 3, 'Dream 2000': 3,
-};
-
 export type StoreName = typeof ALL_STORES[number];
+
+// Category routing regexes
+const APPLE_RE = /iphone|mac|apple|ipad|airpods|watch|آيفون|ماك|ايربودز/i;
+const PC_RE = /laptop|pc|monitor|rtx|intel|amd|لاب|كمبيوتر|شاشة|gpu|ram|ssd|processor/i;
+const MOBILE_RE = /samsung|oppo|xiaomi|realme|هاتف|موبايل|vivo|huawei|honor|tecno|infinix/i;
+
+const GENERAL_STORES: StoreName[] = ['Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', '2B Egypt', 'RayaShop'];
+const APPLE_STORES: StoreName[] = ['Tradeline', 'iShop', 'Switch Plus'];
+const PC_STORES: StoreName[] = ['Sigma', 'ElNekhely', 'Compumarts', 'Maximum Hardware'];
+const MOBILE_STORES: StoreName[] = ['Dream 2000', 'Select.eg', 'Mobile Shop', 'Dubai Phone'];
+
+/** Smart routing: only search stores relevant to the query */
+export function getRelevantStores(query: string): StoreName[] {
+  const stores = new Set<StoreName>(GENERAL_STORES);
+  const isApple = APPLE_RE.test(query);
+  const isPC = PC_RE.test(query);
+  const isMobile = MOBILE_RE.test(query);
+
+  if (isApple) APPLE_STORES.forEach(s => stores.add(s));
+  if (isPC) PC_STORES.forEach(s => stores.add(s));
+  if (isMobile) MOBILE_STORES.forEach(s => stores.add(s));
+
+  // Fallback: if no specific category matched, add mobile stores
+  if (!isApple && !isPC && !isMobile) {
+    MOBILE_STORES.forEach(s => stores.add(s));
+  }
+
+  return Array.from(stores);
+}
 
 export interface RawProduct {
   name: string; name_ar?: string; price: number;
@@ -39,7 +64,47 @@ export interface StoreSearchResult {
   store: string; cachedAt?: string; error?: string;
 }
 
+// ── localStorage Cache (Layer 1) ──
+const LOCAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+interface LocalCacheEntry {
+  products: RawProduct[];
+  timestamp: number;
+  store: string;
+}
+
+function getLocalCacheKey(query: string, store: string): string {
+  return `bd_cache:${store}:${query.trim().toLowerCase()}`;
+}
+
+function getLocalCache(query: string, store: string): RawProduct[] | null {
+  try {
+    const raw = localStorage.getItem(getLocalCacheKey(query, store));
+    if (!raw) return null;
+    const entry: LocalCacheEntry = JSON.parse(raw);
+    if (Date.now() - entry.timestamp > LOCAL_CACHE_TTL_MS) {
+      localStorage.removeItem(getLocalCacheKey(query, store));
+      return null;
+    }
+    return entry.products;
+  } catch { return null; }
+}
+
+function setLocalCache(query: string, store: string, products: RawProduct[]) {
+  if (products.length === 0) return; // never cache empty
+  try {
+    const entry: LocalCacheEntry = { products, timestamp: Date.now(), store };
+    localStorage.setItem(getLocalCacheKey(query, store), JSON.stringify(entry));
+  } catch { /* quota exceeded — ignore */ }
+}
+
 export async function searchStore(query: string, store: string, userId?: string): Promise<StoreSearchResult> {
+  // Layer 1: check localStorage first
+  const localCached = getLocalCache(query, store);
+  if (localCached) {
+    return { success: true, products: localCached, cached: true, store, cachedAt: 'local' };
+  }
+
   try {
     const { data, error } = await supabase.functions.invoke('scrape-prices', {
       body: { query, store, user_id: userId },
@@ -48,7 +113,12 @@ export async function searchStore(query: string, store: string, userId?: string)
       console.error(`[${store}] Error:`, error);
       return { success: false, products: [], cached: false, store, error: error.message };
     }
-    return data as StoreSearchResult;
+    const result = data as StoreSearchResult;
+    // Save to localStorage if successful
+    if (result.success && result.products.length > 0) {
+      setLocalCache(query, store, result.products);
+    }
+    return result;
   } catch (err) {
     return { success: false, products: [], cached: false, store, error: String(err) };
   }
@@ -56,9 +126,10 @@ export async function searchStore(query: string, store: string, userId?: string)
 
 const WHITELISTED_DOMAINS = [
   'amazon.eg', 'noon.com', 'jumia.com.eg', 'btech.com',
-  '2b.com.eg', 'tradeline.com.eg', 'raya.com', 'rfrsh.me',
+  '2b.com.eg', 'tradeline.com.eg', 'rfrsh.me', 'rayashop.com',
   'select.eg', 'compumarts.com', 'elnekhely.com',
   'sigma-computer.com', 'mobileshop.com.eg', 'dream2000.com',
+  'ishop.com.eg', 'switchplus.eg', 'maximumhardware.com', 'dubaiphone.eg',
 ];
 
 export function clientFilterWithFallback(
