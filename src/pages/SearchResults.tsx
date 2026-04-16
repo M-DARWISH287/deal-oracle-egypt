@@ -123,6 +123,11 @@ const SearchResults = () => {
     }
   }, [sliderProducts.length, isLoading]);
 
+  // Refresh credit balance when search completes
+  useEffect(() => {
+    if (!isLoading && hasStarted && user) refreshCredits();
+  }, [isLoading, hasStarted, user]);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-50 border-b border-border bg-white/90 backdrop-blur-lg">
