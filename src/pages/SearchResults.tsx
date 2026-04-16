@@ -83,8 +83,6 @@ const SearchResults = () => {
           return next;
       });
     });
-    // Refresh credits after all stores complete
-    Promise.allSettled(storesToSearch.map(s => searchStore(query, s, user?.id))).then(() => refreshCredits());
     });
   }, [query, selectedStores]);
 
