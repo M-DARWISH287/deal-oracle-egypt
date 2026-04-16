@@ -6,21 +6,17 @@ import { ProductCard } from '@/components/ProductCard';
 import { BudgetSlider } from '@/components/BudgetSlider';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
-import { UserMenu } from '@/components/UserMenu';
 import { useLanguage } from '@/i18n/LanguageContext';
-import { useRegion } from '@/i18n/RegionContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { searchStore, groupProducts, clientFilterWithFallback, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const SearchResults = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { t, lang } = useLanguage();
-  const { region } = useRegion();
-  const { user, refreshCredits } = useAuth();
+  const { user } = useAuth();
   const query = searchParams.get('q') || '';
 
   const [products, setProducts] = useState<Product[]>([]);
@@ -74,15 +70,14 @@ const SearchResults = () => {
             cached: result.cached,
           }));
         } else {
-          console.log(`[${store}] 0 results${result.error ? ': ' + result.error : ''}`);
           setCompletedStores(prev => new Map(prev).set(store, { count: 0, cached: false }));
         }
         setPendingStores(prev => {
           const next = new Set(prev);
           next.delete(store);
           return next;
+        });
       });
-    });
     });
   }, [query, selectedStores]);
 
@@ -90,43 +85,28 @@ const SearchResults = () => {
   const totalStores = ALL_STORES.filter(s => selectedStores.has(s)).length;
   const doneStores = completedStores.size;
 
-  // Smart intent filter with fallback
   const { displayProducts, isRelaxed } = useMemo(() => {
     const { strict, relaxed } = clientFilterWithFallback(products, query);
-
-    // Use strict results if available; otherwise fall back to relaxed variants
     const base = strict.length > 0 ? strict : relaxed;
     const relaxedMode = strict.length === 0 && relaxed.length > 0;
-
-    // Apply budget slider
     const filtered = base.filter(p => {
       const best = Math.min(...p.offers.map(o => o.price));
       return best >= priceRange[0] && best <= priceRange[1];
     });
-
     return { displayProducts: filtered, isRelaxed: relaxedMode };
   }, [products, query, priceRange]);
 
-  // The products used for the budget slider (before budget filter applied)
   const sliderProducts = useMemo(() => {
     const { strict, relaxed } = clientFilterWithFallback(products, query);
     return strict.length > 0 ? strict : relaxed;
   }, [products, query]);
 
-  // Reset slider range when products settle
   useEffect(() => {
     if (sliderProducts.length > 0 && !isLoading) {
       const prices = sliderProducts.flatMap(p => p.offers.map(o => o.price));
-      const min = Math.floor(Math.min(...prices));
-      const max = Math.ceil(Math.max(...prices));
-      setPriceRange([min, max]);
+      setPriceRange([Math.floor(Math.min(...prices)), Math.ceil(Math.max(...prices))]);
     }
   }, [sliderProducts.length, isLoading]);
-
-  // Refresh credit balance when search completes
-  useEffect(() => {
-    if (!isLoading && hasStarted && user) refreshCredits();
-  }, [isLoading, hasStarted, user]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -139,7 +119,6 @@ const SearchResults = () => {
           <div className="flex-1 min-w-0">
             <SearchBar onSearch={handleSearch} defaultValue={query} />
           </div>
-          <UserMenu />
           <RegionSwitcher />
           <LanguageToggle />
         </div>
@@ -148,7 +127,6 @@ const SearchResults = () => {
       <main className="mx-auto max-w-4xl px-4 py-4 space-y-4">
         <StoreSelector selectedStores={selectedStores} onToggle={toggleStore} />
 
-        {/* Live progress */}
         {hasStarted && (
           <div className="flex items-center gap-3 text-sm animate-fade-in">
             {isLoading ? (
@@ -168,14 +146,13 @@ const SearchResults = () => {
                 <CheckCircle2 className="h-4 w-4" />
                 <span>{lang === 'ar' ? 'اكتمل البحث' : 'Search complete'}</span>
                 <span className="text-muted-foreground">
-                 · {displayProducts.length} {lang === 'ar' ? 'منتج' : 'products'}
+                  · {displayProducts.length} {lang === 'ar' ? 'منتج' : 'products'}
                 </span>
               </div>
             )}
           </div>
         )}
 
-        {/* Store status chips */}
         {hasStarted && (
           <div className="flex flex-wrap gap-1.5 animate-fade-in">
             {ALL_STORES.filter(s => selectedStores.has(s)).map((store) => {
@@ -202,7 +179,6 @@ const SearchResults = () => {
           </div>
         )}
 
-        {/* Relaxed intent banner */}
         {isRelaxed && !isLoading && (
           <Alert className="border-amber-200 bg-amber-50 animate-fade-in">
             <AlertTriangle className="h-4 w-4 text-amber-600" />
@@ -214,16 +190,10 @@ const SearchResults = () => {
           </Alert>
         )}
 
-        {/* Budget slider */}
         {sliderProducts.length > 0 && !isLoading && (
-          <BudgetSlider
-            products={sliderProducts}
-            range={priceRange}
-            onChange={setPriceRange}
-          />
+          <BudgetSlider products={sliderProducts} range={priceRange} onChange={setPriceRange} />
         )}
 
-        {/* Product grid */}
         {displayProducts.length > 0 && (
           <div className="space-y-4">
             {displayProducts.map((product, i) => (
@@ -232,7 +202,6 @@ const SearchResults = () => {
           </div>
         )}
 
-        {/* Empty state */}
         {!isLoading && hasStarted && displayProducts.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 text-center space-y-4 animate-fade-in">
             <SearchX className="h-16 w-16 text-muted-foreground/30" />
