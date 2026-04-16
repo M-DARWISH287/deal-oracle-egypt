@@ -20,6 +20,7 @@ const SearchResults = () => {
   const navigate = useNavigate();
   const { t, lang } = useLanguage();
   const { region } = useRegion();
+  const { user, refreshCredits } = useAuth();
   const query = searchParams.get('q') || '';
 
   const [products, setProducts] = useState<Product[]>([]);
