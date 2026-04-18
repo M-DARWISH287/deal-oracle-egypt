@@ -392,19 +392,28 @@ async function scrapeSelect(query: string): Promise<RawProduct[]> {
 
 // ── NATIVE SCRAPERS (Group 2) ──
 
-// Generic Magento scraper (used by RayaShop, Compumarts, B.TECH-style, etc.)
+// Generic Magento scraper (used by RayaShop, Compumarts, etc.) — accepts <li> OR <div> product-item
 async function scrapeMagento(query: string, baseUrl: string, searchPath: string, storeName: string): Promise<RawProduct[]> {
   try {
     const url = `${baseUrl}${searchPath}${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url, {}, 10000)
+    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
     if (!res.ok) { console.log(`[${storeName} native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
-    const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
-    const blocks = html.match(itemRe) || []
+    // Match <li> OR <div> with product-item class
+    const itemRe = /<(?:li|div)[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/(?:li|div)>/g
+    let blocks = html.match(itemRe) || []
+    // Fallback: any block with product-item-link inside
+    if (blocks.length === 0) {
+      const altRe = /<[^>]+class="[^"]*\bproduct(?:-item)?\b[^"]*"[\s\S]{0,2000}?product-item-link[\s\S]{0,2000}?<\/[^>]+>/g
+      blocks = html.match(altRe) || []
+    }
     for (const b of blocks.slice(0, 15)) {
-      const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
+      const linkMatch =
+        b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
+        b.match(/<a[^>]+href="([^"]+)"[^>]*\bclass="[^"]*product-item-link[^"]*"[^>]*>([\s\S]*?)<\/a>/) ||
+        b.match(/<a[^>]+href="(\/[^"]+\.html)"[\s\S]{0,500}?title="([^"]+)"/)
+      const imgMatch = b.match(/<img[^>]+(?:data-src|src)="([^"]+)"/)
       if (!linkMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], baseUrl)
       if (!absUrl) continue
