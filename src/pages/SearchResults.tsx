@@ -44,7 +44,7 @@ const SearchResults = () => {
     setPendingStores(new Set(storesToSearch));
 
     storesToSearch.forEach((store) => {
-      searchStore(q, store, user?.id, forceRefresh).then((result) => {
+      searchStore(q, store, forceRefresh).then((result) => {
         if (result.success && result.products.length > 0) {
           allProductsRef.current = [...allProductsRef.current, ...result.products];
           const grouped = groupProducts(allProductsRef.current);
