@@ -11,6 +11,21 @@ const STORE_TIMEOUT_MS = 15000
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
+// Stealth headers used for Amazon / anti-bot stores
+const STEALTH_HEADERS: Record<string, string> = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+  'Upgrade-Insecure-Requests': '1',
+}
+
 // ── Types ──
 interface RawProduct {
   name: string; name_ar?: string; price: number | string;
@@ -156,7 +171,7 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string): Raw
 
 // ── NATIVE SCRAPERS (Group 1) ──
 
-// Jumia: HTML with article.prd elements
+// Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
 async function scrapeJumia(query: string): Promise<RawProduct[]> {
   try {
     const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(query)}`
@@ -167,18 +182,28 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
     const articles = html.match(articleRe) || []
     for (const a of articles.slice(0, 15)) {
-      const hrefMatch = a.match(/<a[^>]+class="core"[^>]+href="([^"]+)"/) || a.match(/<a[^>]+href="(\/[^"]+)"/)
-      const nameMatch = a.match(/<h3[^>]*class="name"[^>]*>([\s\S]*?)<\/h3>/)
-      const imgMatch = a.match(/<img[^>]+data-src="([^"]+)"/) || a.match(/<img[^>]+src="([^"]+)"/)
+      const hrefMatch =
+        a.match(/<a[^>]+class="[^"]*\bcore\b[^"]*"[^>]+href="([^"]+)"/) ||
+        a.match(/<a[^>]+href="(\/[^"]+\.html[^"]*)"/)
+      const nameMatch =
+        a.match(/<h3[^>]*class="[^"]*\bname\b[^"]*"[^>]*>([\s\S]*?)<\/h3>/) ||
+        a.match(/data-name="([^"]+)"/)
+      const imgMatch =
+        a.match(/<img[^>]+data-src="([^"]+)"/) ||
+        a.match(/<img[^>]+src="([^"]+)"/)
       if (!hrefMatch || !nameMatch) continue
       const absUrl = toAbsoluteUrl(hrefMatch[1], 'https://www.jumia.com.eg')
       if (!absUrl) continue
-      const lowestPrice = extractLowestPrice(a)
-      if (!lowestPrice) continue
+      let priceStr: string | null = extractLowestPrice(a)
+      if (!priceStr) {
+        const prcMatch = a.match(/<div[^>]*class="[^"]*\bprc\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
+        if (prcMatch) priceStr = stripTags(prcMatch[1])
+      }
+      if (!priceStr) continue
       items.push({
         name: stripTags(nameMatch[1]),
         url: absUrl,
-        price: lowestPrice,
+        price: priceStr,
         image: imgMatch ? imgMatch[1] : '',
       })
     }
@@ -186,6 +211,93 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     return normalizeProducts(items, 'Jumia')
   } catch (err) {
     console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// ── Amazon Egypt: native via stealth fetch ──
+async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&language=en_AE`
+    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
+    if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    const cardRe = /<div[^>]+data-component-type="s-search-result"[\s\S]*?(?=<div[^>]+data-component-type="s-search-result"|<div class="s-main-slot)/g
+    const cards = html.match(cardRe) || []
+    for (const card of cards.slice(0, 15)) {
+      const titleMatch =
+        card.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/) ||
+        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/)
+      const linkMatch =
+        card.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/) ||
+        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[^"]+)"/)
+      const imgMatch = card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com\/[^"]+)"/)
+      const priceMatch =
+        card.match(/<span class="a-offscreen">[^<]*?([\d,]+(?:\.\d+)?)/) ||
+        card.match(/<span class="a-price-whole">([\d,]+)/)
+      if (!titleMatch || !linkMatch || !priceMatch) continue
+      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://www.amazon.eg')
+      if (!absUrl) continue
+      items.push({
+        name: stripTags(titleMatch[1]),
+        url: absUrl,
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[Amazon native] ${items.length} raw items, ${cards.length} cards`)
+    return normalizeProducts(items, 'Amazon Egypt')
+  } catch (err) {
+    console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// ── Noon: native via __NEXT_DATA__ embedded JSON ──
+async function scrapeNoon(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url, {
+      headers: { ...STEALTH_HEADERS, 'Referer': 'https://www.noon.com/' },
+    }, 10000)
+    if (!res.ok) { console.log(`[Noon native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+    if (nextDataMatch) {
+      try {
+        const json = JSON.parse(nextDataMatch[1])
+        const hits =
+          json?.props?.pageProps?.catalog?.hits ||
+          json?.props?.pageProps?.searchHits ||
+          json?.props?.pageProps?.initialState?.catalog?.products ||
+          []
+        for (const h of hits.slice(0, 15)) {
+          const name = h.name || h.product_title || h.title
+          const sku = h.sku || h.product_id || h.nis_sku
+          const priceCandidates = [h.sale_price, h.price, h.offer_price].map(parsePrice).filter(Boolean) as number[]
+          const price = priceCandidates.length > 0 ? Math.min(...priceCandidates) : null
+          if (!name || !sku || !price) continue
+          const slug = (h.url || h.product_link || `${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}/${sku}/p`)
+          const absUrl = toAbsoluteUrl(`/egypt-en/${slug}`, 'https://www.noon.com')
+          if (!absUrl) continue
+          items.push({
+            name: String(name),
+            url: absUrl,
+            price,
+            image: h.image_key ? `https://f.nooncdn.com/p/${h.image_key}.jpg` : (h.image || ''),
+          })
+        }
+      } catch (e) {
+        console.log(`[Noon native] __NEXT_DATA__ parse failed:`, e instanceof Error ? e.message : e)
+      }
+    }
+    console.log(`[Noon native] ${items.length} raw items`)
+    return normalizeProducts(items, 'Noon')
+  } catch (err) {
+    console.error(`[Noon native] error:`, err instanceof Error ? err.message : err)
     return []
   }
 }
@@ -280,19 +392,28 @@ async function scrapeSelect(query: string): Promise<RawProduct[]> {
 
 // ── NATIVE SCRAPERS (Group 2) ──
 
-// Generic Magento scraper (used by RayaShop, Compumarts, B.TECH-style, etc.)
+// Generic Magento scraper (used by RayaShop, Compumarts, etc.) — accepts <li> OR <div> product-item
 async function scrapeMagento(query: string, baseUrl: string, searchPath: string, storeName: string): Promise<RawProduct[]> {
   try {
     const url = `${baseUrl}${searchPath}${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url, {}, 10000)
+    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
     if (!res.ok) { console.log(`[${storeName} native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
-    const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
-    const blocks = html.match(itemRe) || []
+    // Match <li> OR <div> with product-item class
+    const itemRe = /<(?:li|div)[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/(?:li|div)>/g
+    let blocks = html.match(itemRe) || []
+    // Fallback: any block with product-item-link inside
+    if (blocks.length === 0) {
+      const altRe = /<[^>]+class="[^"]*\bproduct(?:-item)?\b[^"]*"[\s\S]{0,2000}?product-item-link[\s\S]{0,2000}?<\/[^>]+>/g
+      blocks = html.match(altRe) || []
+    }
     for (const b of blocks.slice(0, 15)) {
-      const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
+      const linkMatch =
+        b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
+        b.match(/<a[^>]+href="([^"]+)"[^>]*\bclass="[^"]*product-item-link[^"]*"[^>]*>([\s\S]*?)<\/a>/) ||
+        b.match(/<a[^>]+href="(\/[^"]+\.html)"[\s\S]{0,500}?title="([^"]+)"/)
+      const imgMatch = b.match(/<img[^>]+(?:data-src|src)="([^"]+)"/)
       if (!linkMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], baseUrl)
       if (!absUrl) continue
@@ -369,28 +490,29 @@ const scrapeRayaShop  = (q: string) => scrapeMagento(q, 'https://rayashop.com', 
 const scrapeCompumarts = (q: string) => scrapeMagento(q, 'https://compumarts.com', '/catalogsearch/result/?q=', 'Compumarts')
 const scrapeTradeline = (q: string) => scrapeShopify(q, 'https://tradeline.com.eg', 'Tradeline')
 const scrapeIShop     = (q: string) => scrapeShopify(q, 'https://ishop.com.eg', 'iShop')
+const scrapeSelectEG  = (q: string) => scrapeShopify(q, 'https://select.eg', 'Select.eg')
 
 // ── 17 STORES ──
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // GENERAL
-  'Amazon Egypt':      { searchUrl: () => '', method: 'serpapi', tier: 1 },
-  'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  // GENERAL — all native (zero-cost)
+  'Amazon Egypt':      { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
+  'Noon':              { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeNoon },
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'Jumia':             { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrape2B },
-  'RayaShop':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
+  'Jumia':             { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeJumia },
+  '2B Egypt':          { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrape2B },
+  'RayaShop':          { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeRayaShop },
   // APPLE_ONLY
-  'Tradeline':         { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeTradeline },
-  'iShop':             { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeIShop },
+  'Tradeline':         { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeTradeline },
+  'iShop':             { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeIShop },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // PC_HARDWARE
   'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeCompumarts },
+  'Compumarts':        { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeCompumarts },
   'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // MOBILE_ONLY
   'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Select.eg':         { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Select.eg':         { searchUrl: () => '', method: 'native',    tier: 3, nativeScraper: scrapeSelectEG },
   'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
   'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
 }
