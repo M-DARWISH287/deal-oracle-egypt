@@ -620,7 +620,9 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // APPLE_ONLY
   // Tradeline → Firecrawl: Supabase edge IPs get blocked at TLS layer
   'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 2, nativeScraper: scrapeIShop },
+  // iShop → Firecrawl: ishop.com.eg domain is dead (DNS NXDOMAIN). Route via Firecrawl
+  // against the working ishopegypt.com domain instead.
+  'iShop':             { searchUrl: q => `https://ishopegypt.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // PC_HARDWARE
   'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
