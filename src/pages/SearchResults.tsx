@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { SearchBar } from '@/components/SearchBar';
 import { ProductCard } from '@/components/ProductCard';
 import { BudgetSlider } from '@/components/BudgetSlider';
+import { SearchSkeleton } from '@/components/SearchSkeleton';
 import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
@@ -196,6 +197,12 @@ const SearchResults = () => {
 
         {sliderProducts.length > 0 && !isLoading && (
           <BudgetSlider products={sliderProducts} range={priceRange} onChange={setPriceRange} />
+        )}
+
+        {isLoading && displayProducts.length === 0 && (
+          <div data-testid="search-skeleton">
+            <SearchSkeleton />
+          </div>
         )}
 
         {displayProducts.length > 0 && (
