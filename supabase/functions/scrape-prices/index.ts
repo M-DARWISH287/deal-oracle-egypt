@@ -256,114 +256,31 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
   }
 }
 
+// Helper: parse Shopify product card block (HTML fallback)
+function parseShopifyCardBlock(block: string, path: string, baseUrl: string): Partial<RawProduct> | null {
+  const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
+  const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
+  if (!titleMatch) return null
+  const absUrl = toAbsoluteUrl(path, baseUrl)
+  if (!absUrl) return null
+  const lowestPrice = extractLowestPrice(block)
+  if (!lowestPrice) return null
+  return { name: titleMatch[1], url: absUrl, price: lowestPrice, image: imgMatch ? imgMatch[1] : '' }
+}
+
 // Dream 2000: Shopify-like — try /search/suggest.json then HTML
 async function scrapeDream2000(query: string): Promise<RawProduct[]> {
-  try {
-    // Try Shopify predictive search JSON first
-    const jsonUrl = `https://dream2000.com/search/suggest.json?q=${encodeURIComponent(query)}&resources[type]=product&resources[limit]=10`
-    const jsonRes = await fetchWithTimeout(jsonUrl, { headers: { 'Accept': 'application/json' } }, 10000)
-    if (jsonRes.ok) {
-      const data = await jsonRes.json().catch(() => null)
-      const products = data?.resources?.results?.products || []
-      if (products.length > 0) {
-        const items: Partial<RawProduct>[] = products.map((p: any) => ({
-          name: p.title,
-          url: p.url?.startsWith('http') ? p.url : `https://dream2000.com${p.url}`,
-          price: p.price,
-          image: p.image || p.featured_image,
-        }))
-        console.log(`[Dream2000 native] JSON ${items.length} items`)
-        return normalizeProducts(items, 'Dream 2000')
-      }
-    }
-    // Fallback: HTML scrape
-    const url = `https://dream2000.com/search?q=${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url)
-    if (!res.ok) { console.log(`[Dream2000 native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
-    const items: Partial<RawProduct>[] = []
-    // Generic Shopify product cards
-    const cardRe = /<a[^>]+href="(\/products\/[^"]+)"[\s\S]{0,800}?<\/a>/g
-    const seen = new Set<string>()
-    let m: RegExpExecArray | null
-    while ((m = cardRe.exec(html)) !== null && items.length < 15) {
-      const path = m[1]
-      if (seen.has(path)) continue
-      seen.add(path)
-      const block = m[0]
-      const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
-      const priceMatch = block.match(/(\d[\d,]*\.?\d*)\s*(?:EGP|ج\.م|LE)/i)
-      const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
-      if (!titleMatch || !priceMatch) continue
-      items.push({
-        name: titleMatch[1],
-        url: `https://dream2000.com${path}`,
-        price: priceMatch[1],
-        image: imgMatch ? imgMatch[1] : '',
-      })
-    }
-    console.log(`[Dream2000 native] HTML ${items.length} items`)
-    return normalizeProducts(items, 'Dream 2000')
-  } catch (err) {
-    console.error(`[Dream2000 native] error:`, err instanceof Error ? err.message : err)
-    return []
-  }
+  return scrapeShopify(query, 'https://dream2000.com', 'Dream 2000')
 }
 
 // Select.eg: Shopify
 async function scrapeSelect(query: string): Promise<RawProduct[]> {
-  try {
-    const jsonUrl = `https://select.eg/search/suggest.json?q=${encodeURIComponent(query)}&resources[type]=product&resources[limit]=10`
-    const jsonRes = await fetchWithTimeout(jsonUrl, { headers: { 'Accept': 'application/json' } }, 10000)
-    if (jsonRes.ok) {
-      const data = await jsonRes.json().catch(() => null)
-      const products = data?.resources?.results?.products || []
-      if (products.length > 0) {
-        const items: Partial<RawProduct>[] = products.map((p: any) => ({
-          name: p.title,
-          url: p.url?.startsWith('http') ? p.url : `https://select.eg${p.url}`,
-          price: p.price,
-          image: p.image || p.featured_image,
-        }))
-        console.log(`[Select native] JSON ${items.length} items`)
-        return normalizeProducts(items, 'Select.eg')
-      }
-    }
-    const url = `https://select.eg/search?q=${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url)
-    if (!res.ok) { console.log(`[Select native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
-    const items: Partial<RawProduct>[] = []
-    const cardRe = /<a[^>]+href="(\/products\/[^"]+)"[\s\S]{0,800}?<\/a>/g
-    const seen = new Set<string>()
-    let m: RegExpExecArray | null
-    while ((m = cardRe.exec(html)) !== null && items.length < 15) {
-      const path = m[1]
-      if (seen.has(path)) continue
-      seen.add(path)
-      const block = m[0]
-      const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
-      const priceMatch = block.match(/(\d[\d,]*\.?\d*)\s*(?:EGP|ج\.م|LE)/i)
-      const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
-      if (!titleMatch || !priceMatch) continue
-      items.push({
-        name: titleMatch[1],
-        url: `https://select.eg${path}`,
-        price: priceMatch[1],
-        image: imgMatch ? imgMatch[1] : '',
-      })
-    }
-    console.log(`[Select native] HTML ${items.length} items`)
-    return normalizeProducts(items, 'Select.eg')
-  } catch (err) {
-    console.error(`[Select native] error:`, err instanceof Error ? err.message : err)
-    return []
-  }
+  return scrapeShopify(query, 'https://select.eg', 'Select.eg')
 }
 
 // ── NATIVE SCRAPERS (Group 2) ──
 
-// Generic Magento scraper (used by RayaShop, Compumarts, etc.)
+// Generic Magento scraper (used by RayaShop, Compumarts, B.TECH-style, etc.)
 async function scrapeMagento(query: string, baseUrl: string, searchPath: string, storeName: string): Promise<RawProduct[]> {
   try {
     const url = `${baseUrl}${searchPath}${encodeURIComponent(query)}`
@@ -375,13 +292,16 @@ async function scrapeMagento(query: string, baseUrl: string, searchPath: string,
     const blocks = html.match(itemRe) || []
     for (const b of blocks.slice(0, 15)) {
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const priceMatch = b.match(/data-price-amount="([0-9.]+)"/) || b.match(/<span[^>]*class="price"[^>]*>([\s\S]*?)<\/span>/)
       const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
-      if (!linkMatch || !priceMatch) continue
+      if (!linkMatch) continue
+      const absUrl = toAbsoluteUrl(linkMatch[1], baseUrl)
+      if (!absUrl) continue
+      const lowestPrice = extractLowestPrice(b)
+      if (!lowestPrice) continue
       items.push({
         name: stripTags(linkMatch[2]),
-        url: linkMatch[1],
-        price: priceMatch[1],
+        url: absUrl,
+        price: lowestPrice,
         image: imgMatch ? imgMatch[1] : '',
       })
     }
@@ -402,14 +322,23 @@ async function scrapeShopify(query: string, baseUrl: string, storeName: string):
       const data = await jsonRes.json().catch(() => null)
       const products = data?.resources?.results?.products || []
       if (products.length > 0) {
-        const items: Partial<RawProduct>[] = products.map((p: any) => ({
-          name: p.title,
-          url: p.url?.startsWith('http') ? p.url : `${baseUrl}${p.url}`,
-          price: p.price,
-          image: p.image || p.featured_image,
-        }))
-        console.log(`[${storeName} native] JSON ${items.length} items`)
-        return normalizeProducts(items, storeName)
+        const items: Partial<RawProduct>[] = []
+        for (const p of products) {
+          const absUrl = toAbsoluteUrl(p.url || '', baseUrl)
+          if (!absUrl) continue
+          // Shopify suggest returns price as string (lowest variant); use Math.min if multiple price fields
+          const candidates: number[] = []
+          for (const k of ['price', 'price_min', 'compare_at_price_min']) {
+            const v = parsePrice(p[k]); if (v !== null && v > 0) candidates.push(v)
+          }
+          const finalPrice = candidates.length > 0 ? Math.min(...candidates) : null
+          if (finalPrice === null) continue
+          items.push({ name: p.title, url: absUrl, price: finalPrice, image: p.image || p.featured_image })
+        }
+        if (items.length > 0) {
+          console.log(`[${storeName} native] JSON ${items.length} items`)
+          return normalizeProducts(items, storeName)
+        }
       }
     }
     // Fallback: HTML scrape
@@ -425,17 +354,8 @@ async function scrapeShopify(query: string, baseUrl: string, storeName: string):
       const path = m[1]
       if (seen.has(path)) continue
       seen.add(path)
-      const block = m[0]
-      const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
-      const priceMatch = block.match(/(\d[\d,]*\.?\d*)\s*(?:EGP|ج\.م|LE)/i)
-      const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
-      if (!titleMatch || !priceMatch) continue
-      items.push({
-        name: titleMatch[1],
-        url: `${baseUrl}${path}`,
-        price: priceMatch[1],
-        image: imgMatch ? imgMatch[1] : '',
-      })
+      const parsed = parseShopifyCardBlock(m[0], path, baseUrl)
+      if (parsed) items.push(parsed)
     }
     console.log(`[${storeName} native] HTML ${items.length} items`)
     return normalizeProducts(items, storeName)
