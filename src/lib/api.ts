@@ -101,7 +101,6 @@ function setLocalCache(query: string, store: string, products: RawProduct[]) {
 export async function searchStore(
   query: string,
   store: string,
-  userId?: string,
   forceRefresh = false,
 ): Promise<StoreSearchResult> {
   // Layer 1: check localStorage first (skipped on force refresh)
@@ -116,8 +115,10 @@ export async function searchStore(
   }
 
   try {
+    // NOTE: user_id is NOT sent in the body — the edge function derives it from the
+    // verified JWT (auto-attached by supabase.functions.invoke when a session exists).
     const { data, error } = await supabase.functions.invoke('scrape-prices', {
-      body: { query, store, user_id: userId, force_refresh: forceRefresh },
+      body: { query, store, force_refresh: forceRefresh },
     });
     if (error) {
       console.error(`[${store}] Error:`, error);
