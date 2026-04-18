@@ -637,9 +637,11 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
 }
 
 // ── Scraper: Firecrawl ──
+// Long timeout is safe: each store is its own edge function call (Promise.allSettled
+// on the client), so a slow Firecrawl run for one store does not block the others.
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), STORE_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
       method: 'POST',
