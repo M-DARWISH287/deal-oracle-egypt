@@ -132,6 +132,27 @@ const WHITELISTED_DOMAINS = [
   'ishop.com.eg', 'switchplus.eg', 'maximumhardware.com', 'dubaiphone.eg',
 ];
 
+const BRAND_EXCLUSIONS: Record<string, string[]> = {
+  iphone: ['samsung', 'galaxy', 'oppo', 'xiaomi', 'redmi', 'realme', 'huawei', 'honor', 'vivo', 'tecno', 'infinix', 'nokia'],
+  apple: ['samsung', 'galaxy', 'oppo', 'xiaomi', 'redmi', 'huawei', 'honor', 'vivo'],
+  ipad: ['samsung', 'galaxy', 'tab ', 'lenovo', 'huawei'],
+  macbook: ['samsung', 'lenovo', 'hp ', 'dell', 'asus', 'acer'],
+  samsung: ['iphone', 'apple ', 'xiaomi', 'redmi', 'oppo', 'huawei'],
+  galaxy: ['iphone', 'apple ', 'xiaomi', 'redmi', 'oppo'],
+  xiaomi: ['iphone', 'samsung', 'galaxy', 'oppo', 'huawei'],
+  redmi: ['iphone', 'samsung', 'galaxy', 'oppo', 'huawei'],
+  oppo: ['iphone', 'samsung', 'galaxy', 'xiaomi', 'redmi'],
+  huawei: ['iphone', 'samsung', 'galaxy', 'xiaomi'],
+};
+
+const ACCESSORY_KEYWORDS_CLIENT = [
+  'case', 'cover', 'protector', 'screen protector', 'tempered glass',
+  'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
+  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
+  'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
+  'film', 'lens protector', 'camera protector',
+];
+
 export function clientFilterWithFallback(
   products: Product[], query: string
 ): { strict: Product[]; relaxed: Product[] } {
@@ -145,6 +166,20 @@ export function clientFilterWithFallback(
     const clone = deepCloneProduct(p);
     const bestPrice = Math.min(...clone.offers.map(o => o.price));
     if (bestPrice < 1500) continue;
+
+    const nameLower = (clone.name.en + ' ' + clone.name.ar).toLowerCase();
+
+    // Drop accessories
+    if (ACCESSORY_KEYWORDS_CLIENT.some(kw => nameLower.includes(kw))) continue;
+
+    // Strict brand matching: drop cross-brand pollution
+    let brandMismatch = false;
+    for (const [brandKw, excluded] of Object.entries(BRAND_EXCLUSIONS)) {
+      if (q.includes(brandKw) && excluded.some(bad => nameLower.includes(bad))) {
+        brandMismatch = true; break;
+      }
+    }
+    if (brandMismatch) continue;
 
     clone.offers = clone.offers.filter(o => {
       try {
