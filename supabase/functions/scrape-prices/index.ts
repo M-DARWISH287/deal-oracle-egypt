@@ -76,6 +76,47 @@ function stripTags(s: string): string {
   return decodeHtml(s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
 }
 
+// Extract ALL prices from a block and return the LOWEST (avoid strikethrough/old price)
+function extractLowestPrice(block: string): string | null {
+  const candidates: number[] = []
+  // Magento data attribute
+  const dataPriceRe = /data-price-amount="([0-9.]+)"/g
+  let m: RegExpExecArray | null
+  while ((m = dataPriceRe.exec(block)) !== null) {
+    const n = parseFloat(m[1]); if (!isNaN(n) && n > 0) candidates.push(n)
+  }
+  // EGP / LE / ج.م amounts
+  const egpRe = /(\d[\d,]{2,})(?:\.\d+)?\s*(?:EGP|ج\.م|LE|جنيه)/gi
+  while ((m = egpRe.exec(block)) !== null) {
+    const n = parseFloat(m[1].replace(/,/g, '')); if (!isNaN(n) && n > 0) candidates.push(n)
+  }
+  // Generic large numbers inside price spans
+  const priceSpanRe = /<(?:span|div|p|strong)[^>]*class="[^"]*\bprice\b[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div|p|strong)>/gi
+  while ((m = priceSpanRe.exec(block)) !== null) {
+    const inner = stripTags(m[1])
+    const num = parsePrice(inner)
+    if (num !== null && num > 0) candidates.push(num)
+  }
+  if (candidates.length === 0) return null
+  return String(Math.min(...candidates))
+}
+
+// Convert relative URL to absolute and reject non-product paths
+function toAbsoluteUrl(href: string, baseUrl: string): string | null {
+  if (!href) return null
+  let url: string
+  try {
+    url = href.startsWith('http') ? href : new URL(href, baseUrl).toString()
+  } catch { return null }
+  // Reject non-product links
+  const lower = url.toLowerCase()
+  const reject = ['add-to-cart', 'addtocart', '/cart', '/login', '/account', '/wishlist',
+                  '/checkout', '/customer/', 'logout', 'javascript:', 'mailto:', '#',
+                  '/category/', '/brand/', '/compare']
+  if (reject.some(r => lower.includes(r))) return null
+  return url
+}
+
 async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs = STORE_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
