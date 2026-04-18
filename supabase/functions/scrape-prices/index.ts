@@ -164,20 +164,21 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
-    // Each product is inside <article class="prd ...">
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
     const articles = html.match(articleRe) || []
     for (const a of articles.slice(0, 15)) {
       const hrefMatch = a.match(/<a[^>]+class="core"[^>]+href="([^"]+)"/) || a.match(/<a[^>]+href="(\/[^"]+)"/)
       const nameMatch = a.match(/<h3[^>]*class="name"[^>]*>([\s\S]*?)<\/h3>/)
-      const priceMatch = a.match(/<div[^>]*class="prc"[^>]*>([\s\S]*?)<\/div>/)
       const imgMatch = a.match(/<img[^>]+data-src="([^"]+)"/) || a.match(/<img[^>]+src="([^"]+)"/)
-      if (!hrefMatch || !nameMatch || !priceMatch) continue
-      const path = hrefMatch[1]
+      if (!hrefMatch || !nameMatch) continue
+      const absUrl = toAbsoluteUrl(hrefMatch[1], 'https://www.jumia.com.eg')
+      if (!absUrl) continue
+      const lowestPrice = extractLowestPrice(a)
+      if (!lowestPrice) continue
       items.push({
         name: stripTags(nameMatch[1]),
-        url: path.startsWith('http') ? path : `https://www.jumia.com.eg${path}`,
-        price: stripTags(priceMatch[1]),
+        url: absUrl,
+        price: lowestPrice,
         image: imgMatch ? imgMatch[1] : '',
       })
     }
