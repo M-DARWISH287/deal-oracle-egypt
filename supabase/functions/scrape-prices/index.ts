@@ -8,6 +8,10 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
+// Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
+// runs in its own edge function invocation (client uses Promise.allSettled), so a
+// long timeout on one store does NOT block the others.
+const FIRECRAWL_TIMEOUT_MS = 90000
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
