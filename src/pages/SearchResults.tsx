@@ -8,7 +8,7 @@ import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { searchStore, groupProducts, clientFilterWithFallback, getRelevantStores, type RawProduct, type Product } from '@/lib/api';
-import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
+import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const SearchResults = () => {
@@ -30,13 +30,9 @@ const SearchResults = () => {
     navigate(`/search?q=${encodeURIComponent(newQuery)}`);
   }, [navigate]);
 
-  useEffect(() => {
-    if (!query) return;
-
-    // Smart routing: only search relevant stores
-    const storesToSearch = getRelevantStores(query);
+  const runSearch = useCallback((q: string, forceRefresh: boolean) => {
+    const storesToSearch = getRelevantStores(q);
     setActiveStores(storesToSearch);
-
     setProducts([]);
     setCompletedStores(new Map());
     setHasStarted(true);
@@ -45,7 +41,7 @@ const SearchResults = () => {
     setPendingStores(new Set(storesToSearch));
 
     storesToSearch.forEach((store) => {
-      searchStore(query, store, user?.id).then((result) => {
+      searchStore(q, store, user?.id, forceRefresh).then((result) => {
         if (result.success && result.products.length > 0) {
           allProductsRef.current = [...allProductsRef.current, ...result.products];
           const grouped = groupProducts(allProductsRef.current);
@@ -71,6 +67,12 @@ const SearchResults = () => {
         });
       });
     });
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!query) return;
+    runSearch(query, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
 
   const isLoading = pendingStores.size > 0;
@@ -118,28 +120,39 @@ const SearchResults = () => {
 
       <main className="mx-auto max-w-4xl px-4 py-4 space-y-4">
         {hasStarted && (
-          <div className="flex items-center gap-3 text-sm animate-fade-in">
-            {isLoading ? (
-              <>
-                <div className="flex items-center gap-2 text-purple-600">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span className="animate-pulse">
-                    {lang === 'ar' ? 'جاري جلب أحدث العروض...' : 'Fetching live deals...'}
+          <div className="flex items-center justify-between gap-3 text-sm animate-fade-in">
+            <div className="flex items-center gap-3 min-w-0">
+              {isLoading ? (
+                <>
+                  <div className="flex items-center gap-2 text-purple-600">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span className="animate-pulse">
+                      {lang === 'ar' ? 'جاري جلب أحدث العروض...' : 'Fetching live deals...'}
+                    </span>
+                  </div>
+                  <span className="text-muted-foreground">
+                    ({doneStores}/{totalStores} {lang === 'ar' ? 'متجر' : 'stores'})
+                  </span>
+                </>
+              ) : (
+                <div className="flex items-center gap-2 text-emerald-600">
+                  <CheckCircle2 className="h-4 w-4" />
+                  <span>{lang === 'ar' ? 'اكتمل البحث' : 'Search complete'}</span>
+                  <span className="text-muted-foreground">
+                    · {displayProducts.length} {lang === 'ar' ? 'منتج' : 'products'}
                   </span>
                 </div>
-                <span className="text-muted-foreground">
-                  ({doneStores}/{totalStores} {lang === 'ar' ? 'متجر' : 'stores'})
-                </span>
-              </>
-            ) : (
-              <div className="flex items-center gap-2 text-emerald-600">
-                <CheckCircle2 className="h-4 w-4" />
-                <span>{lang === 'ar' ? 'اكتمل البحث' : 'Search complete'}</span>
-                <span className="text-muted-foreground">
-                  · {displayProducts.length} {lang === 'ar' ? 'منتج' : 'products'}
-                </span>
-              </div>
-            )}
+              )}
+            </div>
+            <button
+              onClick={() => runSearch(query, true)}
+              disabled={isLoading || !query}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-secondary disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+              title={lang === 'ar' ? 'تحديث وتجاهل الذاكرة المؤقتة' : 'Bypass cache and refetch'}
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{lang === 'ar' ? 'تحديث' : 'Refresh'}</span>
+            </button>
           </div>
         )}
 

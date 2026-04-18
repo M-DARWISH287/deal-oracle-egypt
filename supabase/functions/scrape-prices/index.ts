@@ -675,7 +675,7 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
 
   try {
-    const { query, store, user_id } = await req.json()
+    const { query, store, user_id, force_refresh } = await req.json()
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
       return new Response(JSON.stringify({ success: false, error: 'Query is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
@@ -686,21 +686,23 @@ Deno.serve(async (req) => {
 
     const trimmedQuery = query.trim().toLowerCase()
     const cacheKey = `${store}:${trimmedQuery}`
-    console.log(`[${store}] Query: "${trimmedQuery}" user=${user_id || 'anon'}`)
+    console.log(`[${store}] Query: "${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
-    // ── Check cache (stateless) ──
-    const cacheClient = createClient(supabaseUrl, supabaseKey)
-    const { data: cached } = await cacheClient
-      .from('search_cache').select('results, created_at')
-      .eq('query', cacheKey).gt('expires_at', new Date().toISOString())
-      .order('created_at', { ascending: false }).limit(1).single()
+    // ── Check cache (skipped on force refresh) ──
+    if (!force_refresh) {
+      const cacheClient = createClient(supabaseUrl, supabaseKey)
+      const { data: cached } = await cacheClient
+        .from('search_cache').select('results, created_at')
+        .eq('query', cacheKey).gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: false }).limit(1).single()
 
-    if (cached && Array.isArray(cached.results) && cached.results.length > 0) {
-      console.log(`[${store}] Cache hit (${cached.results.length} products)`)
-      return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      if (cached && Array.isArray(cached.results) && cached.results.length > 0) {
+        console.log(`[${store}] Cache hit (${cached.results.length} products)`)
+        return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      }
     }
 
     // ── Scrape ──

@@ -98,16 +98,26 @@ function setLocalCache(query: string, store: string, products: RawProduct[]) {
   } catch { /* quota exceeded — ignore */ }
 }
 
-export async function searchStore(query: string, store: string, userId?: string): Promise<StoreSearchResult> {
-  // Layer 1: check localStorage first
-  const localCached = getLocalCache(query, store);
-  if (localCached) {
-    return { success: true, products: localCached, cached: true, store, cachedAt: 'local' };
+export async function searchStore(
+  query: string,
+  store: string,
+  userId?: string,
+  forceRefresh = false,
+): Promise<StoreSearchResult> {
+  // Layer 1: check localStorage first (skipped on force refresh)
+  if (!forceRefresh) {
+    const localCached = getLocalCache(query, store);
+    if (localCached) {
+      return { success: true, products: localCached, cached: true, store, cachedAt: 'local' };
+    }
+  } else {
+    // Wipe local entry so future calls fetch fresh
+    try { localStorage.removeItem(getLocalCacheKey(query, store)); } catch { /* ignore */ }
   }
 
   try {
     const { data, error } = await supabase.functions.invoke('scrape-prices', {
-      body: { query, store, user_id: userId },
+      body: { query, store, user_id: userId, force_refresh: forceRefresh },
     });
     if (error) {
       console.error(`[${store}] Error:`, error);
