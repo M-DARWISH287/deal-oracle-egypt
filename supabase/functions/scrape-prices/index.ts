@@ -490,28 +490,29 @@ const scrapeRayaShop  = (q: string) => scrapeMagento(q, 'https://rayashop.com', 
 const scrapeCompumarts = (q: string) => scrapeMagento(q, 'https://compumarts.com', '/catalogsearch/result/?q=', 'Compumarts')
 const scrapeTradeline = (q: string) => scrapeShopify(q, 'https://tradeline.com.eg', 'Tradeline')
 const scrapeIShop     = (q: string) => scrapeShopify(q, 'https://ishop.com.eg', 'iShop')
+const scrapeSelectEG  = (q: string) => scrapeShopify(q, 'https://select.eg', 'Select.eg')
 
 // ── 17 STORES ──
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // GENERAL
-  'Amazon Egypt':      { searchUrl: () => '', method: 'serpapi', tier: 1 },
-  'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  // GENERAL — all native (zero-cost)
+  'Amazon Egypt':      { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
+  'Noon':              { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeNoon },
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'Jumia':             { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrape2B },
-  'RayaShop':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
+  'Jumia':             { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeJumia },
+  '2B Egypt':          { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrape2B },
+  'RayaShop':          { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeRayaShop },
   // APPLE_ONLY
-  'Tradeline':         { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeTradeline },
-  'iShop':             { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeIShop },
+  'Tradeline':         { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeTradeline },
+  'iShop':             { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeIShop },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // PC_HARDWARE
   'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeCompumarts },
+  'Compumarts':        { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeCompumarts },
   'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // MOBILE_ONLY
   'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Select.eg':         { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Select.eg':         { searchUrl: () => '', method: 'native',    tier: 3, nativeScraper: scrapeSelectEG },
   'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
   'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
 }
