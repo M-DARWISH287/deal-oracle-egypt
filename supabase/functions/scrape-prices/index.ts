@@ -171,7 +171,7 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string): Raw
 
 // ── NATIVE SCRAPERS (Group 1) ──
 
-// Jumia: HTML with article.prd elements
+// Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
 async function scrapeJumia(query: string): Promise<RawProduct[]> {
   try {
     const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(query)}`
@@ -182,18 +182,28 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
     const articles = html.match(articleRe) || []
     for (const a of articles.slice(0, 15)) {
-      const hrefMatch = a.match(/<a[^>]+class="core"[^>]+href="([^"]+)"/) || a.match(/<a[^>]+href="(\/[^"]+)"/)
-      const nameMatch = a.match(/<h3[^>]*class="name"[^>]*>([\s\S]*?)<\/h3>/)
-      const imgMatch = a.match(/<img[^>]+data-src="([^"]+)"/) || a.match(/<img[^>]+src="([^"]+)"/)
+      const hrefMatch =
+        a.match(/<a[^>]+class="[^"]*\bcore\b[^"]*"[^>]+href="([^"]+)"/) ||
+        a.match(/<a[^>]+href="(\/[^"]+\.html[^"]*)"/)
+      const nameMatch =
+        a.match(/<h3[^>]*class="[^"]*\bname\b[^"]*"[^>]*>([\s\S]*?)<\/h3>/) ||
+        a.match(/data-name="([^"]+)"/)
+      const imgMatch =
+        a.match(/<img[^>]+data-src="([^"]+)"/) ||
+        a.match(/<img[^>]+src="([^"]+)"/)
       if (!hrefMatch || !nameMatch) continue
       const absUrl = toAbsoluteUrl(hrefMatch[1], 'https://www.jumia.com.eg')
       if (!absUrl) continue
-      const lowestPrice = extractLowestPrice(a)
-      if (!lowestPrice) continue
+      let priceStr: string | null = extractLowestPrice(a)
+      if (!priceStr) {
+        const prcMatch = a.match(/<div[^>]*class="[^"]*\bprc\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
+        if (prcMatch) priceStr = stripTags(prcMatch[1])
+      }
+      if (!priceStr) continue
       items.push({
         name: stripTags(nameMatch[1]),
         url: absUrl,
-        price: lowestPrice,
+        price: priceStr,
         image: imgMatch ? imgMatch[1] : '',
       })
     }
@@ -201,6 +211,93 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     return normalizeProducts(items, 'Jumia')
   } catch (err) {
     console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// ── Amazon Egypt: native via stealth fetch ──
+async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&language=en_AE`
+    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
+    if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    const cardRe = /<div[^>]+data-component-type="s-search-result"[\s\S]*?(?=<div[^>]+data-component-type="s-search-result"|<div class="s-main-slot)/g
+    const cards = html.match(cardRe) || []
+    for (const card of cards.slice(0, 15)) {
+      const titleMatch =
+        card.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/) ||
+        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/)
+      const linkMatch =
+        card.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/) ||
+        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[^"]+)"/)
+      const imgMatch = card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com\/[^"]+)"/)
+      const priceMatch =
+        card.match(/<span class="a-price-whole">([\d,]+)/) ||
+        card.match(/<span class="a-offscreen">[^<]*?([\d,]+(?:\.\d+)?)/)
+      if (!titleMatch || !linkMatch || !priceMatch) continue
+      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://www.amazon.eg')
+      if (!absUrl) continue
+      items.push({
+        name: stripTags(titleMatch[1]),
+        url: absUrl,
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[Amazon native] ${items.length} raw items`)
+    return normalizeProducts(items, 'Amazon Egypt')
+  } catch (err) {
+    console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// ── Noon: native via __NEXT_DATA__ embedded JSON ──
+async function scrapeNoon(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url, {
+      headers: { ...STEALTH_HEADERS, 'Referer': 'https://www.noon.com/' },
+    }, 10000)
+    if (!res.ok) { console.log(`[Noon native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+    if (nextDataMatch) {
+      try {
+        const json = JSON.parse(nextDataMatch[1])
+        const hits =
+          json?.props?.pageProps?.catalog?.hits ||
+          json?.props?.pageProps?.searchHits ||
+          json?.props?.pageProps?.initialState?.catalog?.products ||
+          []
+        for (const h of hits.slice(0, 15)) {
+          const name = h.name || h.product_title || h.title
+          const sku = h.sku || h.product_id || h.nis_sku
+          const priceCandidates = [h.sale_price, h.price, h.offer_price].map(parsePrice).filter(Boolean) as number[]
+          const price = priceCandidates.length > 0 ? Math.min(...priceCandidates) : null
+          if (!name || !sku || !price) continue
+          const slug = (h.url || h.product_link || `${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}/${sku}/p`)
+          const absUrl = toAbsoluteUrl(`/egypt-en/${slug}`, 'https://www.noon.com')
+          if (!absUrl) continue
+          items.push({
+            name: String(name),
+            url: absUrl,
+            price,
+            image: h.image_key ? `https://f.nooncdn.com/p/${h.image_key}.jpg` : (h.image || ''),
+          })
+        }
+      } catch (e) {
+        console.log(`[Noon native] __NEXT_DATA__ parse failed:`, e instanceof Error ? e.message : e)
+      }
+    }
+    console.log(`[Noon native] ${items.length} raw items`)
+    return normalizeProducts(items, 'Noon')
+  } catch (err) {
+    console.error(`[Noon native] error:`, err instanceof Error ? err.message : err)
     return []
   }
 }
