@@ -1,9 +1,8 @@
 import { useState } from 'react';
-import { ExternalLink, Copy, Check, Tag, RefreshCw, Repeat, CalendarClock } from 'lucide-react';
+import { ExternalLink, Copy, Check, Tag, RefreshCw, Repeat } from 'lucide-react';
 import { useLanguage } from '@/i18n/LanguageContext';
 import type { Product } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
-import { calculateInstallment } from '@/lib/installments';
 
 const STORE_LOGOS: Record<string, string> = {
   'Amazon Egypt': 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Amazon_logo.svg/200px-Amazon_logo.svg.png',
@@ -72,30 +71,13 @@ export function ProductCard({ product, index }: ProductCardProps) {
 
           <p className="text-xs sm:text-sm text-muted-foreground mb-3 line-clamp-1 break-words">{product.specs[lang]}</p>
 
-          <div className="flex flex-col gap-1.5 mb-3">
-            <div className="flex items-center gap-2">
-              <span className="text-lg sm:text-xl font-bold text-foreground">
-                {formatPrice(bestPrice.price)} {t('egp')}
-              </span>
-              <span className="text-xs sm:text-sm text-muted-foreground truncate">
-                {t('from')} {bestPrice.store}
-              </span>
-            </div>
-            {bestPrice.price > 0 && (() => {
-              const monthly = calculateInstallment(bestPrice.price, 12, 0);
-              if (monthly <= 0) return null;
-              return (
-                <div
-                  data-testid="installment-badge"
-                  className="inline-flex items-center gap-1.5 self-start rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-[11px] sm:text-xs font-semibold text-emerald-700"
-                >
-                  <CalendarClock className="h-3 w-3" />
-                  {lang === 'ar'
-                    ? `أو قسط من ${formatPrice(monthly)} ج.م / شهر`
-                    : `Or from ${formatPrice(monthly)} EGP / month`}
-                </div>
-              );
-            })()}
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-lg sm:text-xl font-bold text-foreground">
+              {formatPrice(bestPrice.price)} {t('egp')}
+            </span>
+            <span className="text-xs sm:text-sm text-muted-foreground truncate">
+              {t('from')} {bestPrice.store}
+            </span>
           </div>
 
           <div className="space-y-2">
