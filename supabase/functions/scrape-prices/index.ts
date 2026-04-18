@@ -234,8 +234,8 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
         card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[^"]+)"/)
       const imgMatch = card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com\/[^"]+)"/)
       const priceMatch =
-        card.match(/<span class="a-price-whole">([\d,]+)/) ||
-        card.match(/<span class="a-offscreen">[^<]*?([\d,]+(?:\.\d+)?)/)
+        card.match(/<span class="a-offscreen">[^<]*?([\d,]+(?:\.\d+)?)/) ||
+        card.match(/<span class="a-price-whole">([\d,]+)/)
       if (!titleMatch || !linkMatch || !priceMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://www.amazon.eg')
       if (!absUrl) continue
@@ -246,7 +246,7 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
         image: imgMatch ? imgMatch[1] : '',
       })
     }
-    console.log(`[Amazon native] ${items.length} raw items`)
+    console.log(`[Amazon native] ${items.length} raw items, ${cards.length} cards`)
     return normalizeProducts(items, 'Amazon Egypt')
   } catch (err) {
     console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
