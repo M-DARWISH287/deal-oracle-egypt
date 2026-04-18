@@ -8,6 +8,10 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
+// Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
+// runs in its own edge function invocation (client uses Promise.allSettled), so a
+// long timeout on one store does NOT block the others.
+const FIRECRAWL_TIMEOUT_MS = 90000
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -241,6 +245,8 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
 }
 
 // ── Amazon Egypt: native via stealth fetch ──
+// 2026 DOM: search results are <div role="listitem" data-asin="..." data-component-type="s-search-result">
+// We split on data-asin boundaries (more resilient than s-search-result-only matching).
 async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
   try {
     const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&language=en_AE`
@@ -248,19 +254,40 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
     if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
-    const cardRe = /<div[^>]+data-component-type="s-search-result"[\s\S]*?(?=<div[^>]+data-component-type="s-search-result"|<div class="s-main-slot)/g
-    const cards = html.match(cardRe) || []
-    for (const card of cards.slice(0, 15)) {
+
+    // Strategy 1: split on data-asin (works regardless of wrapper class names)
+    let cards: string[] = []
+    const asinSplitRe = /<div[^>]+data-asin="[A-Z0-9]{10}"[^>]*>/g
+    const matches = [...html.matchAll(asinSplitRe)]
+    if (matches.length > 0) {
+      for (let i = 0; i < matches.length; i++) {
+        const start = matches[i].index!
+        const end = i + 1 < matches.length ? matches[i + 1].index! : Math.min(start + 8000, html.length)
+        cards.push(html.slice(start, end))
+      }
+    }
+    // Strategy 2 (fallback): old s-search-result splitting
+    if (cards.length === 0) {
+      const cardRe = /<div[^>]+data-component-type="s-search-result"[\s\S]*?(?=<div[^>]+data-component-type="s-search-result"|<div class="s-main-slot)/g
+      cards = html.match(cardRe) || []
+    }
+
+    for (const card of cards.slice(0, 20)) {
+      // Skip sponsored/ad slots that have no real price
       const titleMatch =
+        card.match(/<h2[^>]*aria-label="([^"]+)"/) ||
         card.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/) ||
-        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/)
+        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/) ||
+        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*s-line-clamp[^"]*"[^>]*>([\s\S]*?)<\/a>/)
       const linkMatch =
-        card.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/) ||
-        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[^"]+)"/)
+        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[A-Z0-9]+[^"]*)"/) ||
+        card.match(/<a[^>]+href="(\/[^"]+\/dp\/[A-Z0-9]+[^"]*)"/) ||
+        card.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/)
       const imgMatch = card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com\/[^"]+)"/)
       const priceMatch =
         card.match(/<span class="a-offscreen">[^<]*?([\d,]+(?:\.\d+)?)/) ||
-        card.match(/<span class="a-price-whole">([\d,]+)/)
+        card.match(/<span class="a-price-whole">([\d,]+)/) ||
+        card.match(/<span[^>]*class="[^"]*a-price[^"]*"[^>]*>[\s\S]*?<span[^>]*class="[^"]*a-offscreen[^"]*"[^>]*>[^\d]*([\d,]+(?:\.\d+)?)/)
       if (!titleMatch || !linkMatch || !priceMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://www.amazon.eg')
       if (!absUrl) continue
@@ -593,7 +620,9 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // APPLE_ONLY
   // Tradeline → Firecrawl: Supabase edge IPs get blocked at TLS layer
   'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 2, nativeScraper: scrapeIShop },
+  // iShop → Firecrawl: ishop.com.eg domain is dead (DNS NXDOMAIN). Route via Firecrawl
+  // against the working ishopegypt.com domain instead.
+  'iShop':             { searchUrl: q => `https://ishopegypt.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // PC_HARDWARE
   'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
@@ -608,9 +637,11 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
 }
 
 // ── Scraper: Firecrawl ──
+// Long timeout is safe: each store is its own edge function call (Promise.allSettled
+// on the client), so a slow Firecrawl run for one store does not block the others.
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), STORE_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
       method: 'POST',
@@ -639,6 +670,7 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
           prompt: `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products, no accessories.`,
         },
         waitFor: 5000,
+        timeout: 75000, // Firecrawl-side timeout (ms). Default ~30s was too tight.
       }),
     })
     const data = await response.json()
