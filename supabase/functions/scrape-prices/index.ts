@@ -589,7 +589,7 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'Jumia':             { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeJumia },
   '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrape2B },
-  'RayaShop':          { searchUrl: q => `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
+  'RayaShop':          { searchUrl: q => `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
   // APPLE_ONLY
   // Tradeline → Firecrawl: Supabase edge IPs get blocked at TLS layer
   'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
