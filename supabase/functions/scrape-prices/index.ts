@@ -9,54 +9,32 @@ const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
 
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
 // ── Types ──
 interface RawProduct {
   name: string; name_ar?: string; price: number | string;
   url: string; image?: string; specs?: string; store: string; isRefurbished?: boolean;
 }
 
+type ScrapeMethod = 'native' | 'firecrawl' | 'serpapi'
+
 interface StoreConfig {
   searchUrl: (q: string) => string;
-  method: 'firecrawl' | 'serpapi';
+  method: ScrapeMethod;
   tier: 1 | 2 | 3;
-}
-
-// ── 17 STORES ──
-const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // GENERAL
-  'Amazon Egypt':      { searchUrl: () => '', method: 'serpapi', tier: 1 },
-  'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'B.TECH':            { searchUrl: () => '', method: 'serpapi', tier: 1 },
-  'Jumia':             { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'RayaShop':          { searchUrl: q => `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  // APPLE_ONLY
-  'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // PC_HARDWARE
-  'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // MOBILE_ONLY
-  'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Select.eg':         { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-}
-
-const SERPAPI_STORE_FILTERS: Record<string, string> = {
-  'Amazon Egypt': 'amazon.eg',
-  'B.TECH': 'btech.com',
+  nativeScraper?: (q: string) => Promise<RawProduct[]>;
 }
 
 // ── Helpers ──
-function parsePrice(text: string): number | null {
-  if (!text) return null
-  const cleaned = text
+function parsePrice(text: string | number | undefined | null): number | null {
+  if (text === null || text === undefined) return null
+  const str = String(text)
+  if (!str) return null
+  const cleaned = str
     .replace(/شهري[اً]?|قسط|monthly|\/month/gi, '')
     .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/,/g, '')
     .replace(/[^0-9.]/g, '')
   const num = parseFloat(cleaned)
   return isNaN(num) ? null : num
@@ -85,6 +63,284 @@ const ACCESSORY_KEYWORDS = [
 function isAccessory(name: string): boolean {
   const lower = name.toLowerCase()
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
+}
+
+function decodeHtml(s: string): string {
+  return s
+    .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'")
+    .replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+}
+
+function stripTags(s: string): string {
+  return decodeHtml(s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+}
+
+async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs = STORE_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, {
+      ...opts,
+      signal: controller.signal,
+      headers: {
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+        ...(opts.headers || {}),
+      },
+    })
+  } finally { clearTimeout(timeout) }
+}
+
+function normalizeProducts(items: Partial<RawProduct>[], storeName: string): RawProduct[] {
+  return items
+    .filter(p => p.name && p.url && !isAccessory(String(p.name)))
+    .slice(0, 5)
+    .map(p => {
+      const parsed = parsePrice(p.price as any)
+      return {
+        name: String(p.name),
+        name_ar: p.name_ar || String(p.name),
+        price: parsed ?? 0,
+        url: String(p.url),
+        image: p.image || '',
+        specs: p.specs || '',
+        store: storeName,
+        isRefurbished: checkRefurbished(String(p.name)),
+      }
+    })
+    .filter(p => p.price >= MINIMUM_PRICE_THRESHOLD)
+}
+
+// ── NATIVE SCRAPERS (Group 1) ──
+
+// Jumia: HTML with article.prd elements
+async function scrapeJumia(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url)
+    if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    // Each product is inside <article class="prd ...">
+    const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
+    const articles = html.match(articleRe) || []
+    for (const a of articles.slice(0, 15)) {
+      const hrefMatch = a.match(/<a[^>]+class="core"[^>]+href="([^"]+)"/) || a.match(/<a[^>]+href="(\/[^"]+)"/)
+      const nameMatch = a.match(/<h3[^>]*class="name"[^>]*>([\s\S]*?)<\/h3>/)
+      const priceMatch = a.match(/<div[^>]*class="prc"[^>]*>([\s\S]*?)<\/div>/)
+      const imgMatch = a.match(/<img[^>]+data-src="([^"]+)"/) || a.match(/<img[^>]+src="([^"]+)"/)
+      if (!hrefMatch || !nameMatch || !priceMatch) continue
+      const path = hrefMatch[1]
+      items.push({
+        name: stripTags(nameMatch[1]),
+        url: path.startsWith('http') ? path : `https://www.jumia.com.eg${path}`,
+        price: stripTags(priceMatch[1]),
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[Jumia native] ${items.length} raw items`)
+    return normalizeProducts(items, 'Jumia')
+  } catch (err) {
+    console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// B.TECH: Magento/PWA — try the storefront search HTML
+async function scrapeBtech(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url)
+    if (!res.ok) { console.log(`[B.TECH native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    // Magento product items
+    const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
+    const blocks = html.match(itemRe) || []
+    for (const b of blocks.slice(0, 15)) {
+      const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
+      const priceMatch = b.match(/data-price-amount="([0-9.]+)"/) || b.match(/<span[^>]*class="price"[^>]*>([\s\S]*?)<\/span>/)
+      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
+      if (!linkMatch || !priceMatch) continue
+      items.push({
+        name: stripTags(linkMatch[2]),
+        url: linkMatch[1],
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[B.TECH native] ${items.length} raw items`)
+    return normalizeProducts(items, 'B.TECH')
+  } catch (err) {
+    console.error(`[B.TECH native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// 2B Egypt: Magento search
+async function scrape2B(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url)
+    if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
+    const blocks = html.match(itemRe) || []
+    for (const b of blocks.slice(0, 15)) {
+      const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
+      const priceMatch = b.match(/data-price-amount="([0-9.]+)"/) || b.match(/<span[^>]*class="price"[^>]*>([\s\S]*?)<\/span>/)
+      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
+      if (!linkMatch || !priceMatch) continue
+      items.push({
+        name: stripTags(linkMatch[2]),
+        url: linkMatch[1],
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[2B native] ${items.length} raw items`)
+    return normalizeProducts(items, '2B Egypt')
+  } catch (err) {
+    console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// Dream 2000: Shopify-like — try /search/suggest.json then HTML
+async function scrapeDream2000(query: string): Promise<RawProduct[]> {
+  try {
+    // Try Shopify predictive search JSON first
+    const jsonUrl = `https://dream2000.com/search/suggest.json?q=${encodeURIComponent(query)}&resources[type]=product&resources[limit]=10`
+    const jsonRes = await fetchWithTimeout(jsonUrl, { headers: { 'Accept': 'application/json' } }, 10000)
+    if (jsonRes.ok) {
+      const data = await jsonRes.json().catch(() => null)
+      const products = data?.resources?.results?.products || []
+      if (products.length > 0) {
+        const items: Partial<RawProduct>[] = products.map((p: any) => ({
+          name: p.title,
+          url: p.url?.startsWith('http') ? p.url : `https://dream2000.com${p.url}`,
+          price: p.price,
+          image: p.image || p.featured_image,
+        }))
+        console.log(`[Dream2000 native] JSON ${items.length} items`)
+        return normalizeProducts(items, 'Dream 2000')
+      }
+    }
+    // Fallback: HTML scrape
+    const url = `https://dream2000.com/search?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url)
+    if (!res.ok) { console.log(`[Dream2000 native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    // Generic Shopify product cards
+    const cardRe = /<a[^>]+href="(\/products\/[^"]+)"[\s\S]{0,800}?<\/a>/g
+    const seen = new Set<string>()
+    let m: RegExpExecArray | null
+    while ((m = cardRe.exec(html)) !== null && items.length < 15) {
+      const path = m[1]
+      if (seen.has(path)) continue
+      seen.add(path)
+      const block = m[0]
+      const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
+      const priceMatch = block.match(/(\d[\d,]*\.?\d*)\s*(?:EGP|ج\.م|LE)/i)
+      const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
+      if (!titleMatch || !priceMatch) continue
+      items.push({
+        name: titleMatch[1],
+        url: `https://dream2000.com${path}`,
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[Dream2000 native] HTML ${items.length} items`)
+    return normalizeProducts(items, 'Dream 2000')
+  } catch (err) {
+    console.error(`[Dream2000 native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// Select.eg: Shopify
+async function scrapeSelect(query: string): Promise<RawProduct[]> {
+  try {
+    const jsonUrl = `https://select.eg/search/suggest.json?q=${encodeURIComponent(query)}&resources[type]=product&resources[limit]=10`
+    const jsonRes = await fetchWithTimeout(jsonUrl, { headers: { 'Accept': 'application/json' } }, 10000)
+    if (jsonRes.ok) {
+      const data = await jsonRes.json().catch(() => null)
+      const products = data?.resources?.results?.products || []
+      if (products.length > 0) {
+        const items: Partial<RawProduct>[] = products.map((p: any) => ({
+          name: p.title,
+          url: p.url?.startsWith('http') ? p.url : `https://select.eg${p.url}`,
+          price: p.price,
+          image: p.image || p.featured_image,
+        }))
+        console.log(`[Select native] JSON ${items.length} items`)
+        return normalizeProducts(items, 'Select.eg')
+      }
+    }
+    const url = `https://select.eg/search?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url)
+    if (!res.ok) { console.log(`[Select native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    const cardRe = /<a[^>]+href="(\/products\/[^"]+)"[\s\S]{0,800}?<\/a>/g
+    const seen = new Set<string>()
+    let m: RegExpExecArray | null
+    while ((m = cardRe.exec(html)) !== null && items.length < 15) {
+      const path = m[1]
+      if (seen.has(path)) continue
+      seen.add(path)
+      const block = m[0]
+      const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
+      const priceMatch = block.match(/(\d[\d,]*\.?\d*)\s*(?:EGP|ج\.م|LE)/i)
+      const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
+      if (!titleMatch || !priceMatch) continue
+      items.push({
+        name: titleMatch[1],
+        url: `https://select.eg${path}`,
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[Select native] HTML ${items.length} items`)
+    return normalizeProducts(items, 'Select.eg')
+  } catch (err) {
+    console.error(`[Select native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// ── 17 STORES ──
+const STORE_CONFIGS: Record<string, StoreConfig> = {
+  // GENERAL
+  'Amazon Egypt':      { searchUrl: () => '', method: 'serpapi', tier: 1 },
+  'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'B.TECH':            { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeBtech },
+  'Jumia':             { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeJumia },
+  '2B Egypt':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrape2B },
+  'RayaShop':          { searchUrl: q => `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  // APPLE_ONLY
+  'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  // PC_HARDWARE
+  'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  // MOBILE_ONLY
+  'Dream 2000':        { searchUrl: () => '', method: 'native', tier: 3, nativeScraper: scrapeDream2000 },
+  'Select.eg':         { searchUrl: () => '', method: 'native', tier: 3, nativeScraper: scrapeSelect },
+  'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+}
+
+const SERPAPI_STORE_FILTERS: Record<string, string> = {
+  'Amazon Egypt': 'amazon.eg',
 }
 
 // ── Scraper: Firecrawl ──
@@ -125,10 +381,7 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
     if (!response.ok) { console.error(`[Firecrawl] ${storeName} error:`, data); return [] }
     const products = data?.data?.extract?.products || data?.extract?.products || []
     console.log(`[Firecrawl] ${storeName}: ${products.length} raw products`)
-    return products.filter((p: any) => p.name && p.price && !isAccessory(p.name)).slice(0, 5).map((p: any) => {
-      const parsed = parsePrice(String(p.price))
-      return { name: p.name, name_ar: p.name_ar || p.name, price: parsed ?? 0, url: p.url, image: p.image || '', specs: p.specs || '', store: storeName, isRefurbished: checkRefurbished(p.name) }
-    }).filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
+    return normalizeProducts(products, storeName)
   } catch (err) {
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
     return []
@@ -215,9 +468,10 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // ── Reserve 1 credit if authenticated ──
+    // ── Reserve 1 credit if authenticated (skip for native — they're free) ──
+    const config = STORE_CONFIGS[store]
     let txId: string | null = null
-    if (user_id) {
+    if (user_id && config.method !== 'native') {
       txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
       if (!txId) {
         return new Response(JSON.stringify({ success: false, error: 'Insufficient credits' }), { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
@@ -225,13 +479,15 @@ Deno.serve(async (req) => {
     }
 
     // ── Scrape ──
-    const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     const serpApiKey = Deno.env.get('SERPAPI_API_KEY')
     let products: RawProduct[] = []
 
     try {
-      if (config.method === 'firecrawl') {
+      if (config.method === 'native') {
+        if (!config.nativeScraper) throw new Error('Native scraper not configured')
+        products = await config.nativeScraper(trimmedQuery)
+      } else if (config.method === 'firecrawl') {
         if (!firecrawlKey) throw new Error('Firecrawl not configured')
         products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
       } else {
@@ -240,7 +496,8 @@ Deno.serve(async (req) => {
       }
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
-      return new Response(JSON.stringify({ success: false, error: String(scrapeErr), store }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      console.error(`[${store}] Scrape error:`, scrapeErr)
+      return new Response(JSON.stringify({ success: true, products: [], cached: false, store, error: String(scrapeErr) }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
     // ── Settle credits ──
