@@ -30,13 +30,9 @@ const SearchResults = () => {
     navigate(`/search?q=${encodeURIComponent(newQuery)}`);
   }, [navigate]);
 
-  useEffect(() => {
-    if (!query) return;
-
-    // Smart routing: only search relevant stores
-    const storesToSearch = getRelevantStores(query);
+  const runSearch = useCallback((q: string, forceRefresh: boolean) => {
+    const storesToSearch = getRelevantStores(q);
     setActiveStores(storesToSearch);
-
     setProducts([]);
     setCompletedStores(new Map());
     setHasStarted(true);
@@ -45,7 +41,7 @@ const SearchResults = () => {
     setPendingStores(new Set(storesToSearch));
 
     storesToSearch.forEach((store) => {
-      searchStore(query, store, user?.id).then((result) => {
+      searchStore(q, store, user?.id, forceRefresh).then((result) => {
         if (result.success && result.products.length > 0) {
           allProductsRef.current = [...allProductsRef.current, ...result.products];
           const grouped = groupProducts(allProductsRef.current);
@@ -71,6 +67,12 @@ const SearchResults = () => {
         });
       });
     });
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!query) return;
+    runSearch(query, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
 
   const isLoading = pendingStores.size > 0;
