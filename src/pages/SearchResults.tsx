@@ -9,6 +9,7 @@ import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { searchStore, groupProducts, clientFilterWithFallback, getRelevantStores, type RawProduct, type Product } from '@/lib/api';
+import { logSearch } from '@/lib/analytics';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
@@ -107,6 +108,15 @@ const SearchResults = () => {
       setPriceRange([Math.floor(Math.min(...prices)), Math.ceil(Math.max(...prices))]);
     }
   }, [sliderProducts.length, isLoading]);
+
+  // Analytics: log each completed search exactly once per (query, completion) pair.
+  const loggedQueryRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!hasStarted || isLoading || !query) return;
+    if (loggedQueryRef.current === query) return;
+    loggedQueryRef.current = query;
+    logSearch(query, displayProducts.length);
+  }, [hasStarted, isLoading, query, displayProducts.length]);
 
   return (
     <div className="min-h-screen bg-slate-50">
