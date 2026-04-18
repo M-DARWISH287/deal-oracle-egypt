@@ -25,6 +25,7 @@ const SearchResults = () => {
   const [hasStarted, setHasStarted] = useState(false);
   const [priceRange, setPriceRange] = useState<[number, number]>([0, 999999]);
   const [activeStores, setActiveStores] = useState<string[]>([]);
+  const [storeFilter, setStoreFilter] = useState<string | null>(null);
   const allProductsRef = useRef<RawProduct[]>([]);
 
   const handleSearch = useCallback((newQuery: string) => {
@@ -80,16 +81,20 @@ const SearchResults = () => {
   const totalStores = activeStores.length;
   const doneStores = completedStores.size;
 
-  const { displayProducts, isRelaxed } = useMemo(() => {
+  const { displayProducts, isRelaxed, availableStores } = useMemo(() => {
     const { strict, relaxed } = clientFilterWithFallback(products, query);
     const base = strict.length > 0 ? strict : relaxed;
     const relaxedMode = strict.length === 0 && relaxed.length > 0;
-    const filtered = base.filter(p => {
+    const priceFiltered = base.filter(p => {
       const best = Math.min(...p.offers.map(o => o.price));
       return best >= priceRange[0] && best <= priceRange[1];
     });
-    return { displayProducts: filtered, isRelaxed: relaxedMode };
-  }, [products, query, priceRange]);
+    const stores = Array.from(new Set(priceFiltered.flatMap(p => p.offers.map(o => o.store)))).sort();
+    const filtered = storeFilter
+      ? priceFiltered.filter(p => p.offers.some(o => o.store === storeFilter))
+      : priceFiltered;
+    return { displayProducts: filtered, isRelaxed: relaxedMode, availableStores: stores };
+  }, [products, query, priceRange, storeFilter]);
 
   const sliderProducts = useMemo(() => {
     const { strict, relaxed } = clientFilterWithFallback(products, query);
@@ -199,6 +204,34 @@ const SearchResults = () => {
           <BudgetSlider products={sliderProducts} range={priceRange} onChange={setPriceRange} />
         )}
 
+        {!isLoading && availableStores.length > 1 && (
+          <div data-testid="store-filter-pills" className="flex flex-wrap gap-1.5 animate-fade-in">
+            <button
+              onClick={() => setStoreFilter(null)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                storeFilter === null
+                  ? 'bg-purple-600 text-white'
+                  : 'bg-secondary text-muted-foreground hover:bg-secondary/80'
+              }`}
+            >
+              {lang === 'ar' ? 'كل المتاجر' : 'All stores'}
+            </button>
+            {availableStores.map((store) => (
+              <button
+                key={store}
+                onClick={() => setStoreFilter(prev => prev === store ? null : store)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  storeFilter === store
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-secondary text-muted-foreground hover:bg-secondary/80'
+                }`}
+              >
+                {store}
+              </button>
+            ))}
+          </div>
+        )}
+
         {isLoading && displayProducts.length === 0 && (
           <div data-testid="search-skeleton">
             <SearchSkeleton />
@@ -214,9 +247,21 @@ const SearchResults = () => {
         )}
 
         {!isLoading && hasStarted && displayProducts.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-20 text-center space-y-4 animate-fade-in">
+          <div
+            data-testid="empty-state"
+            className="flex flex-col items-center justify-center py-20 text-center space-y-3 animate-fade-in"
+          >
             <SearchX className="h-16 w-16 text-muted-foreground/30" />
-            <p className="text-lg text-muted-foreground">{t('noResults')}</p>
+            <p className="text-lg font-semibold text-foreground">
+              {lang === 'ar'
+                ? 'لم نتمكن من العثور على عروض لهذا المنتج'
+                : "We couldn't find deals for this product"}
+            </p>
+            <p className="text-sm text-muted-foreground max-w-sm">
+              {lang === 'ar'
+                ? 'جرّب كلمات مختلفة أو تحقق من الإملاء — مثلاً "iPhone 15" بدلاً من رقم الموديل الكامل.'
+                : 'Try different keywords or check spelling — e.g. "iPhone 15" instead of the full model code.'}
+            </p>
           </div>
         )}
       </main>
