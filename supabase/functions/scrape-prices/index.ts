@@ -314,6 +314,95 @@ async function scrapeSelect(query: string): Promise<RawProduct[]> {
   }
 }
 
+// ── NATIVE SCRAPERS (Group 2) ──
+
+// Generic Magento scraper (used by RayaShop, Compumarts, etc.)
+async function scrapeMagento(query: string, baseUrl: string, searchPath: string, storeName: string): Promise<RawProduct[]> {
+  try {
+    const url = `${baseUrl}${searchPath}${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url, {}, 10000)
+    if (!res.ok) { console.log(`[${storeName} native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
+    const blocks = html.match(itemRe) || []
+    for (const b of blocks.slice(0, 15)) {
+      const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
+      const priceMatch = b.match(/data-price-amount="([0-9.]+)"/) || b.match(/<span[^>]*class="price"[^>]*>([\s\S]*?)<\/span>/)
+      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
+      if (!linkMatch || !priceMatch) continue
+      items.push({
+        name: stripTags(linkMatch[2]),
+        url: linkMatch[1],
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[${storeName} native] ${items.length} raw items`)
+    return normalizeProducts(items, storeName)
+  } catch (err) {
+    console.error(`[${storeName} native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+// Generic Shopify scraper using /search/suggest.json + HTML fallback
+async function scrapeShopify(query: string, baseUrl: string, storeName: string): Promise<RawProduct[]> {
+  try {
+    const jsonUrl = `${baseUrl}/search/suggest.json?q=${encodeURIComponent(query)}&resources[type]=product&resources[limit]=10`
+    const jsonRes = await fetchWithTimeout(jsonUrl, { headers: { 'Accept': 'application/json' } }, 10000)
+    if (jsonRes.ok) {
+      const data = await jsonRes.json().catch(() => null)
+      const products = data?.resources?.results?.products || []
+      if (products.length > 0) {
+        const items: Partial<RawProduct>[] = products.map((p: any) => ({
+          name: p.title,
+          url: p.url?.startsWith('http') ? p.url : `${baseUrl}${p.url}`,
+          price: p.price,
+          image: p.image || p.featured_image,
+        }))
+        console.log(`[${storeName} native] JSON ${items.length} items`)
+        return normalizeProducts(items, storeName)
+      }
+    }
+    // Fallback: HTML scrape
+    const htmlUrl = `${baseUrl}/search?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(htmlUrl, {}, 10000)
+    if (!res.ok) { console.log(`[${storeName} native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    const cardRe = /<a[^>]+href="(\/products\/[^"]+)"[\s\S]{0,800}?<\/a>/g
+    const seen = new Set<string>()
+    let m: RegExpExecArray | null
+    while ((m = cardRe.exec(html)) !== null && items.length < 15) {
+      const path = m[1]
+      if (seen.has(path)) continue
+      seen.add(path)
+      const block = m[0]
+      const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
+      const priceMatch = block.match(/(\d[\d,]*\.?\d*)\s*(?:EGP|ج\.م|LE)/i)
+      const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
+      if (!titleMatch || !priceMatch) continue
+      items.push({
+        name: titleMatch[1],
+        url: `${baseUrl}${path}`,
+        price: priceMatch[1],
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+    console.log(`[${storeName} native] HTML ${items.length} items`)
+    return normalizeProducts(items, storeName)
+  } catch (err) {
+    console.error(`[${storeName} native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
+const scrapeRayaShop  = (q: string) => scrapeMagento(q, 'https://rayashop.com', '/catalogsearch/result/?q=', 'RayaShop')
+const scrapeCompumarts = (q: string) => scrapeMagento(q, 'https://compumarts.com', '/catalogsearch/result/?q=', 'Compumarts')
+const scrapeTradeline = (q: string) => scrapeShopify(q, 'https://tradeline.com.eg', 'Tradeline')
+const scrapeIShop     = (q: string) => scrapeShopify(q, 'https://ishop.com.eg', 'iShop')
+
 // ── 17 STORES ──
 const STORE_CONFIGS: Record<string, StoreConfig> = {
   // GENERAL
@@ -322,15 +411,15 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'Jumia':             { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeJumia },
   '2B Egypt':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrape2B },
-  'RayaShop':          { searchUrl: q => `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'RayaShop':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
   // APPLE_ONLY
-  'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Tradeline':         { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeTradeline },
+  'iShop':             { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeIShop },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // PC_HARDWARE
   'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Compumarts':        { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeCompumarts },
   'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // MOBILE_ONLY
   'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
