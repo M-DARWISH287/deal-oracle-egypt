@@ -512,34 +512,59 @@ async function scrapeShopify(query: string, baseUrl: string, storeName: string):
 }
 
 // RayaShop uses Hyvä theme — different DOM than classic Magento. Try Hyvä first, then generic Magento.
+// CRITICAL: Only accept canonical product URLs ending in .html and prepend https://www.rayashop.com.
 async function scrapeRayaShop(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(query)}`
+    const url = `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(query)}`
     const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
     if (!res.ok) { console.log(`[RayaShop native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
-    // Hyvä: <div class="product-item-info" data-product-id="...">
     const hyvaRe = /<div[^>]*class="[^"]*product-item-info[^"]*"[\s\S]*?(?=<div[^>]*class="[^"]*product-item-info|<\/(?:ol|ul|main))/g
     let blocks = html.match(hyvaRe) || []
     if (blocks.length === 0) {
-      // Hyvä alt: <li class="item product product-item">
       const altRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
       blocks = html.match(altRe) || []
     }
+    const seenUrls = new Set<string>()
     for (const b of blocks.slice(0, 15)) {
-      const linkMatch =
-        b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
-        b.match(/<a[^>]+href="(https:\/\/rayashop\.com\/[^"]+\.html)"[^>]*>([\s\S]*?)<\/a>/) ||
-        b.match(/<a[^>]+href="([^"]+\.html)"[\s\S]{0,300}?(?:title="([^"]+)"|>([^<]{5,120})<\/a>)/)
-      const imgMatch = b.match(/<img[^>]+(?:data-src|src)="([^"]+)"/)
-      if (!linkMatch) continue
-      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://rayashop.com')
-      if (!absUrl) continue
+      let canonicalHref: string | null = null
+      let nameFromAnchor = ''
+      const linkPatterns: RegExp[] = [
+        /<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/,
+        /<a[^>]+href="([^"]+\.html[^"]*)"[^>]*\bclass="[^"]*product-item-link[^"]*"[^>]*>([\s\S]*?)<\/a>/,
+        /<a[^>]+href="(https?:\/\/(?:www\.)?rayashop\.com\/[^"]+\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/,
+        /<a[^>]+href="(\/[^"]+\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/,
+      ]
+      for (const re of linkPatterns) {
+        const m = b.match(re)
+        if (m) { canonicalHref = m[1]; nameFromAnchor = stripTags(m[2] || ''); break }
+      }
+      if (!canonicalHref) continue
+      const lowerHref = canonicalHref.toLowerCase()
+      if (/add-?to-?cart|wishlist|compare|javascript:|checkout|customer|\/category\//.test(lowerHref)) continue
+      if (!/\.html(\?|$|#)/.test(lowerHref)) continue
+      let absUrl: string
+      try {
+        absUrl = canonicalHref.startsWith('http')
+          ? canonicalHref.replace(/^https?:\/\/(www\.)?rayashop\.com/, 'https://www.rayashop.com')
+          : `https://www.rayashop.com${canonicalHref.startsWith('/') ? '' : '/'}${canonicalHref}`
+      } catch { continue }
+      if (seenUrls.has(absUrl)) continue
+      seenUrls.add(absUrl)
+
+      // Single lowest price per card (Math.min over all detected candidates)
       const lowestPrice = extractLowestPrice(b)
       if (!lowestPrice) continue
-      const name = stripTags(linkMatch[2] || linkMatch[3] || '')
+
+      let name = nameFromAnchor
+      if (!name) {
+        const titleM = b.match(/title="([^"]+)"/) || b.match(/<img[^>]+alt="([^"]+)"/)
+        name = titleM ? stripTags(titleM[1]) : ''
+      }
       if (!name) continue
+
+      const imgMatch = b.match(/<img[^>]+(?:data-src|src)="([^"]+)"/)
       items.push({ name, url: absUrl, price: lowestPrice, image: imgMatch ? imgMatch[1] : '' })
     }
     console.log(`[RayaShop native] ${items.length} raw items (${blocks.length} blocks)`)
