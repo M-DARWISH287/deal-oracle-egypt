@@ -60,14 +60,34 @@ function checkRefurbished(name: string): boolean {
   return /restored|renewed|refurbished|مجدد/i.test(name)
 }
 
-// Relaxed intent matcher: only drops products with stronger variants than the query.
-// Example: query "iphone 15" keeps "iPhone 15" AND "iPhone 15 Pro" (Pro is acceptable upgrade).
-// We only drop "Pro Max" / "Ultra" when the user clearly typed a base or lower variant.
+// Brand exclusion map: if the query mentions a brand, drop results from competitor brands.
+const BRAND_EXCLUSIONS: Record<string, string[]> = {
+  iphone: ['samsung', 'galaxy', 'oppo', 'xiaomi', 'redmi', 'realme', 'huawei', 'honor', 'vivo', 'tecno', 'infinix', 'nokia'],
+  apple: ['samsung', 'galaxy', 'oppo', 'xiaomi', 'redmi', 'huawei', 'honor', 'vivo'],
+  ipad: ['samsung', 'galaxy', 'tab ', 'lenovo', 'huawei'],
+  macbook: ['samsung', 'lenovo', 'hp ', 'dell', 'asus', 'acer'],
+  samsung: ['iphone', 'apple ', 'xiaomi', 'redmi', 'oppo', 'huawei'],
+  galaxy: ['iphone', 'apple ', 'xiaomi', 'redmi', 'oppo'],
+  xiaomi: ['iphone', 'samsung', 'galaxy', 'oppo', 'huawei'],
+  redmi: ['iphone', 'samsung', 'galaxy', 'oppo', 'huawei'],
+  oppo: ['iphone', 'samsung', 'galaxy', 'xiaomi', 'redmi'],
+  huawei: ['iphone', 'samsung', 'galaxy', 'xiaomi'],
+}
+
+// Relaxed intent matcher + STRICT brand matcher.
+// - Drops Pro Max/Ultra when user typed a base variant.
+// - Drops cross-brand pollution (iPhone query → no Samsung).
 function matchesIntent(query: string, productName: string): boolean {
   const q = query.toLowerCase(); const n = productName.toLowerCase()
-  // Only filter the strongest variants when query is clearly base
+  // Variant filter
   if (!q.includes('max') && !q.includes('ultra')) {
     if (n.includes('pro max') || n.includes('ultra')) return false
+  }
+  // Brand filter: if query mentions a brand keyword, reject cross-brand results
+  for (const [brandKw, excluded] of Object.entries(BRAND_EXCLUSIONS)) {
+    if (q.includes(brandKw)) {
+      if (excluded.some(bad => n.includes(bad))) return false
+    }
   }
   return true
 }
@@ -75,8 +95,9 @@ function matchesIntent(query: string, productName: string): boolean {
 const ACCESSORY_KEYWORDS = [
   'case', 'cover', 'protector', 'screen protector', 'tempered glass',
   'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
-  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة',
+  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
   'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
+  'film', 'glass', 'lens protector', 'camera protector',
 ]
 
 function isAccessory(name: string): boolean {
