@@ -32,9 +32,10 @@ interface RawProduct {
   url: string; image?: string; specs?: string; store: string; isRefurbished?: boolean;
 }
 
-type ScrapeMethod = 'native' | 'firecrawl' | 'serpapi'
+type ScrapeMethod = 'native' | 'firecrawl'
 
 interface StoreConfig {
+  // Used when method='firecrawl' OR when native fails and Safety Valve fallback fires
   searchUrl: (q: string) => string;
   method: ScrapeMethod;
   tier: 1 | 2 | 3;
@@ -59,12 +60,15 @@ function checkRefurbished(name: string): boolean {
   return /restored|renewed|refurbished|مجدد/i.test(name)
 }
 
+// Relaxed intent matcher: only drops products with stronger variants than the query.
+// Example: query "iphone 15" keeps "iPhone 15" AND "iPhone 15 Pro" (Pro is acceptable upgrade).
+// We only drop "Pro Max" / "Ultra" when the user clearly typed a base or lower variant.
 function matchesIntent(query: string, productName: string): boolean {
   const q = query.toLowerCase(); const n = productName.toLowerCase()
-  for (const v of ['pro', 'plus', 'max', 'ultra']) {
-    if (!q.includes(v) && n.includes(v)) return false
+  // Only filter the strongest variants when query is clearly base
+  if (!q.includes('max') && !q.includes('ultra')) {
+    if (n.includes('pro max') || n.includes('ultra')) return false
   }
-  if (!q.includes('+') && !q.includes('plus') && n.includes('+')) return false
   return true
 }
 
@@ -486,39 +490,75 @@ async function scrapeShopify(query: string, baseUrl: string, storeName: string):
   }
 }
 
-const scrapeRayaShop  = (q: string) => scrapeMagento(q, 'https://rayashop.com', '/catalogsearch/result/?q=', 'RayaShop')
+// RayaShop uses Hyvä theme — different DOM than classic Magento. Try Hyvä first, then generic Magento.
+async function scrapeRayaShop(query: string): Promise<RawProduct[]> {
+  try {
+    const url = `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(query)}`
+    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
+    if (!res.ok) { console.log(`[RayaShop native] HTTP ${res.status}`); return [] }
+    const html = await res.text()
+    const items: Partial<RawProduct>[] = []
+    // Hyvä: <div class="product-item-info" data-product-id="...">
+    const hyvaRe = /<div[^>]*class="[^"]*product-item-info[^"]*"[\s\S]*?(?=<div[^>]*class="[^"]*product-item-info|<\/(?:ol|ul|main))/g
+    let blocks = html.match(hyvaRe) || []
+    if (blocks.length === 0) {
+      // Hyvä alt: <li class="item product product-item">
+      const altRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
+      blocks = html.match(altRe) || []
+    }
+    for (const b of blocks.slice(0, 15)) {
+      const linkMatch =
+        b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
+        b.match(/<a[^>]+href="(https:\/\/rayashop\.com\/[^"]+\.html)"[^>]*>([\s\S]*?)<\/a>/) ||
+        b.match(/<a[^>]+href="([^"]+\.html)"[\s\S]{0,300}?(?:title="([^"]+)"|>([^<]{5,120})<\/a>)/)
+      const imgMatch = b.match(/<img[^>]+(?:data-src|src)="([^"]+)"/)
+      if (!linkMatch) continue
+      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://rayashop.com')
+      if (!absUrl) continue
+      const lowestPrice = extractLowestPrice(b)
+      if (!lowestPrice) continue
+      const name = stripTags(linkMatch[2] || linkMatch[3] || '')
+      if (!name) continue
+      items.push({ name, url: absUrl, price: lowestPrice, image: imgMatch ? imgMatch[1] : '' })
+    }
+    console.log(`[RayaShop native] ${items.length} raw items (${blocks.length} blocks)`)
+    return normalizeProducts(items, 'RayaShop')
+  } catch (err) {
+    console.error(`[RayaShop native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
 const scrapeCompumarts = (q: string) => scrapeMagento(q, 'https://compumarts.com', '/catalogsearch/result/?q=', 'Compumarts')
-const scrapeTradeline = (q: string) => scrapeShopify(q, 'https://tradeline.com.eg', 'Tradeline')
 const scrapeIShop     = (q: string) => scrapeShopify(q, 'https://ishop.com.eg', 'iShop')
 const scrapeSelectEG  = (q: string) => scrapeShopify(q, 'https://select.eg', 'Select.eg')
 
 // ── 17 STORES ──
+// Each native store also has a searchUrl, used as the Firecrawl fallback target if native returns 0 items.
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // GENERAL — all native (zero-cost)
-  'Amazon Egypt':      { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
-  'Noon':              { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeNoon },
+  // GENERAL
+  'Amazon Egypt':      { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeAmazonEG },
+  // Noon → Firecrawl: Supabase edge IPs get HTTP/2 reset + DNS issues against noon.com
+  'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'Jumia':             { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':          { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrape2B },
-  'RayaShop':          { searchUrl: () => '', method: 'native',    tier: 1, nativeScraper: scrapeRayaShop },
+  'Jumia':             { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeJumia },
+  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrape2B },
+  'RayaShop':          { searchUrl: q => `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
   // APPLE_ONLY
-  'Tradeline':         { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeTradeline },
-  'iShop':             { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeIShop },
+  // Tradeline → Firecrawl: Supabase edge IPs get blocked at TLS layer
+  'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 2, nativeScraper: scrapeIShop },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // PC_HARDWARE
   'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: () => '', method: 'native',    tier: 2, nativeScraper: scrapeCompumarts },
+  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 2, nativeScraper: scrapeCompumarts },
   'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // MOBILE_ONLY
   'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Select.eg':         { searchUrl: () => '', method: 'native',    tier: 3, nativeScraper: scrapeSelectEG },
+  'Select.eg':         { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 3, nativeScraper: scrapeSelectEG },
   'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
   'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-}
-
-const SERPAPI_STORE_FILTERS: Record<string, string> = {
-  'Amazon Egypt': 'amazon.eg',
 }
 
 // ── Scraper: Firecrawl ──
@@ -564,35 +604,6 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
     return []
   } finally { clearTimeout(timeout) }
-}
-
-// ── Scraper: SerpApi ──
-async function scrapeWithSerpApi(query: string, storeName: string, serpApiKey: string): Promise<RawProduct[]> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), STORE_TIMEOUT_MS)
-  try {
-    const storeFilter = SERPAPI_STORE_FILTERS[storeName] || ''
-    const searchQuery = storeFilter ? `${query} ${storeFilter}` : query
-    const params = new URLSearchParams({ engine: 'google_shopping', q: searchQuery, hl: 'en', num: '10', api_key: serpApiKey })
-    const response = await fetch(`https://serpapi.com/search.json?${params}`, { signal: controller.signal })
-    const data = await response.json()
-    console.log(`[SerpApi] ${storeName}: ${(data.shopping_results || []).length} raw results`)
-    if (!response.ok) return []
-    const results = data.shopping_results || []
-    const storeDomain = SERPAPI_STORE_FILTERS[storeName]
-    return results.filter((r: any) => {
-      if (!r.title || !r.price || isAccessory(r.title)) return false
-      if (storeDomain) {
-        const link = (r.product_link || r.link || '').toLowerCase()
-        if (!link.includes(storeDomain)) return false
-      }
-      return true
-    }).slice(0, 5).map((r: any) => {
-      const parsed = parsePrice(r.extracted_price?.toString() || r.price || '0')
-      return { name: r.title, name_ar: r.title, price: parsed ?? 0, url: r.product_link || r.link || '', image: r.thumbnail || '', specs: r.snippet || '', store: storeName, isRefurbished: checkRefurbished(r.title) }
-    }).filter((p: RawProduct) => p.price >= MINIMUM_PRICE_THRESHOLD)
-  } catch (err) { console.error(`[SerpApi] ${storeName}:`, err); return [] }
-  finally { clearTimeout(timeout) }
 }
 
 // ── Credit helpers (stateless) ──
@@ -646,31 +657,50 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // ── Reserve 1 credit if authenticated (skip for native — they're free) ──
-    const config = STORE_CONFIGS[store]
-    let txId: string | null = null
-    if (user_id && config.method !== 'native') {
-      txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-      if (!txId) {
-        return new Response(JSON.stringify({ success: false, error: 'Insufficient credits' }), { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
-      }
-    }
-
     // ── Scrape ──
+    // Credit logic:
+    //   - method='firecrawl': reserve 1 credit upfront, settle 1 if items returned else 0
+    //   - method='native': zero cost. If native returns 0 items, Safety Valve fires → reserve+charge 1 credit only when Firecrawl fallback returns items.
+    const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
-    const serpApiKey = Deno.env.get('SERPAPI_API_KEY')
     let products: RawProduct[] = []
+    let txId: string | null = null
+    let usedFallback = false
 
     try {
       if (config.method === 'native') {
         if (!config.nativeScraper) throw new Error('Native scraper not configured')
         products = await config.nativeScraper(trimmedQuery)
-      } else if (config.method === 'firecrawl') {
-        if (!firecrawlKey) throw new Error('Firecrawl not configured')
-        products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
+
+        // ── Safety Valve: native returned 0 → silently fall back to Firecrawl ──
+        if (products.length === 0 && firecrawlKey) {
+          console.log(`[${store}] Safety Valve triggered — native returned 0, trying Firecrawl fallback`)
+          if (user_id) {
+            txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
+            // If user has no credits, just return 0 results silently — no error
+            if (!txId) {
+              console.log(`[${store}] Safety Valve skipped — no credits`)
+            }
+          }
+          if (!user_id || txId) {
+            const fallback = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
+            if (fallback.length > 0) {
+              products = fallback
+              usedFallback = true
+              console.log(`[${store}] Safety Valve recovered ${products.length} items via Firecrawl`)
+            }
+          }
+        }
       } else {
-        if (!serpApiKey) throw new Error('SerpApi not configured')
-        products = await scrapeWithSerpApi(trimmedQuery, store, serpApiKey)
+        // method='firecrawl' — reserve credit upfront
+        if (!firecrawlKey) throw new Error('Firecrawl not configured')
+        if (user_id) {
+          txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
+          if (!txId) {
+            return new Response(JSON.stringify({ success: false, error: 'Insufficient credits' }), { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+          }
+        }
+        products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
       }
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
@@ -679,9 +709,12 @@ Deno.serve(async (req) => {
     }
 
     // ── Settle credits ──
+    // Charge 1 only if (a) firecrawl method OR (b) native fallback recovered items.
     if (txId) {
-      await settleCredits(supabaseUrl, supabaseKey, txId, products.length > 0 ? 1 : 0)
+      const charge = products.length > 0 ? 1 : 0
+      await settleCredits(supabaseUrl, supabaseKey, txId, charge)
     }
+    if (usedFallback) console.log(`[${store}] Used Firecrawl fallback (charged ${products.length > 0 ? 1 : 0} credit)`)
 
     // Intent filter
     const beforeCount = products.length
@@ -699,7 +732,7 @@ Deno.serve(async (req) => {
     }
 
     console.log(`[${store}] Returning ${products.length} products`)
-    return new Response(JSON.stringify({ success: true, products, cached: false, store }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    return new Response(JSON.stringify({ success: true, products, cached: false, store, usedFallback }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
     return new Response(JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
