@@ -670,6 +670,7 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
           prompt: `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products, no accessories.`,
         },
         waitFor: 5000,
+        timeout: 75000, // Firecrawl-side timeout (ms). Default ~30s was too tight.
       }),
     })
     const data = await response.json()
