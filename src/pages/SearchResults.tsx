@@ -109,6 +109,15 @@ const SearchResults = () => {
     }
   }, [sliderProducts.length, isLoading]);
 
+  // Analytics: log each completed search exactly once per (query, completion) pair.
+  const loggedQueryRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!hasStarted || isLoading || !query) return;
+    if (loggedQueryRef.current === query) return;
+    loggedQueryRef.current = query;
+    logSearch(query, displayProducts.length);
+  }, [hasStarted, isLoading, query, displayProducts.length]);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-50 border-b border-border bg-white/90 backdrop-blur-lg">
