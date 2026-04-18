@@ -198,18 +198,20 @@ async function scrapeBtech(query: string): Promise<RawProduct[]> {
     if (!res.ok) { console.log(`[B.TECH native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
-    // Magento product items
     const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
     const blocks = html.match(itemRe) || []
     for (const b of blocks.slice(0, 15)) {
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const priceMatch = b.match(/data-price-amount="([0-9.]+)"/) || b.match(/<span[^>]*class="price"[^>]*>([\s\S]*?)<\/span>/)
       const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
-      if (!linkMatch || !priceMatch) continue
+      if (!linkMatch) continue
+      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://btech.com')
+      if (!absUrl) continue
+      const lowestPrice = extractLowestPrice(b)
+      if (!lowestPrice) continue
       items.push({
         name: stripTags(linkMatch[2]),
-        url: linkMatch[1],
-        price: priceMatch[1],
+        url: absUrl,
+        price: lowestPrice,
         image: imgMatch ? imgMatch[1] : '',
       })
     }
@@ -233,13 +235,16 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
     const blocks = html.match(itemRe) || []
     for (const b of blocks.slice(0, 15)) {
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const priceMatch = b.match(/data-price-amount="([0-9.]+)"/) || b.match(/<span[^>]*class="price"[^>]*>([\s\S]*?)<\/span>/)
       const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
-      if (!linkMatch || !priceMatch) continue
+      if (!linkMatch) continue
+      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://2b.com.eg')
+      if (!absUrl) continue
+      const lowestPrice = extractLowestPrice(b)
+      if (!lowestPrice) continue
       items.push({
         name: stripTags(linkMatch[2]),
-        url: linkMatch[1],
-        price: priceMatch[1],
+        url: absUrl,
+        price: lowestPrice,
         image: imgMatch ? imgMatch[1] : '',
       })
     }
