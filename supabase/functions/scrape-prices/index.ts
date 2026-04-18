@@ -675,7 +675,10 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
 
   try {
-    const { query, store, user_id, force_refresh } = await req.json()
+    const body = await req.json()
+    const { query, store, force_refresh } = body
+    // SECURITY: NEVER trust user_id from request body. Always verify via JWT.
+    // Any user_id in the body is ignored to prevent credit theft.
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
       return new Response(JSON.stringify({ success: false, error: 'Query is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
@@ -684,12 +687,31 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ success: false, error: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}` }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!
+
+    // ── SECURITY: Verify caller identity via JWT (optional — anonymous searches allowed, but credit ops require auth) ──
+    let user_id: string | null = null
+    const authHeader = req.headers.get('Authorization')
+    if (authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.replace('Bearer ', '')
+      try {
+        const authClient = createClient(supabaseUrl, supabaseAnonKey)
+        const { data, error } = await authClient.auth.getUser(token)
+        if (!error && data?.user?.id) {
+          user_id = data.user.id
+        } else if (error) {
+          console.warn(`[${store}] JWT verify failed: ${error.message} — treating as anonymous`)
+        }
+      } catch (err) {
+        console.warn(`[${store}] JWT verify exception:`, err)
+      }
+    }
+
     const trimmedQuery = query.trim().toLowerCase()
     const cacheKey = `${store}:${trimmedQuery}`
     console.log(`[${store}] Query: "${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
-
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
     // ── Check cache (skipped on force refresh) ──
     if (!force_refresh) {
