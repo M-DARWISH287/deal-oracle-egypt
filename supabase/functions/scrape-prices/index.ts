@@ -411,15 +411,15 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'Jumia':             { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeJumia },
   '2B Egypt':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrape2B },
-  'RayaShop':          { searchUrl: q => `https://rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'RayaShop':          { searchUrl: () => '', method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
   // APPLE_ONLY
-  'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'iShop':             { searchUrl: q => `https://ishop.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Tradeline':         { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeTradeline },
+  'iShop':             { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeIShop },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // PC_HARDWARE
   'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
+  'Compumarts':        { searchUrl: () => '', method: 'native', tier: 2, nativeScraper: scrapeCompumarts },
   'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
   // MOBILE_ONLY
   'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
