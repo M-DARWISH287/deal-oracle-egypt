@@ -245,6 +245,8 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
 }
 
 // ── Amazon Egypt: native via stealth fetch ──
+// 2026 DOM: search results are <div role="listitem" data-asin="..." data-component-type="s-search-result">
+// We split on data-asin boundaries (more resilient than s-search-result-only matching).
 async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
   try {
     const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&language=en_AE`
@@ -252,19 +254,40 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
     if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
-    const cardRe = /<div[^>]+data-component-type="s-search-result"[\s\S]*?(?=<div[^>]+data-component-type="s-search-result"|<div class="s-main-slot)/g
-    const cards = html.match(cardRe) || []
-    for (const card of cards.slice(0, 15)) {
+
+    // Strategy 1: split on data-asin (works regardless of wrapper class names)
+    let cards: string[] = []
+    const asinSplitRe = /<div[^>]+data-asin="[A-Z0-9]{10}"[^>]*>/g
+    const matches = [...html.matchAll(asinSplitRe)]
+    if (matches.length > 0) {
+      for (let i = 0; i < matches.length; i++) {
+        const start = matches[i].index!
+        const end = i + 1 < matches.length ? matches[i + 1].index! : Math.min(start + 8000, html.length)
+        cards.push(html.slice(start, end))
+      }
+    }
+    // Strategy 2 (fallback): old s-search-result splitting
+    if (cards.length === 0) {
+      const cardRe = /<div[^>]+data-component-type="s-search-result"[\s\S]*?(?=<div[^>]+data-component-type="s-search-result"|<div class="s-main-slot)/g
+      cards = html.match(cardRe) || []
+    }
+
+    for (const card of cards.slice(0, 20)) {
+      // Skip sponsored/ad slots that have no real price
       const titleMatch =
+        card.match(/<h2[^>]*aria-label="([^"]+)"/) ||
         card.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/) ||
-        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/)
+        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/) ||
+        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*s-line-clamp[^"]*"[^>]*>([\s\S]*?)<\/a>/)
       const linkMatch =
-        card.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/) ||
-        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[^"]+)"/)
+        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[A-Z0-9]+[^"]*)"/) ||
+        card.match(/<a[^>]+href="(\/[^"]+\/dp\/[A-Z0-9]+[^"]*)"/) ||
+        card.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/)
       const imgMatch = card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com\/[^"]+)"/)
       const priceMatch =
         card.match(/<span class="a-offscreen">[^<]*?([\d,]+(?:\.\d+)?)/) ||
-        card.match(/<span class="a-price-whole">([\d,]+)/)
+        card.match(/<span class="a-price-whole">([\d,]+)/) ||
+        card.match(/<span[^>]*class="[^"]*a-price[^"]*"[^>]*>[\s\S]*?<span[^>]*class="[^"]*a-offscreen[^"]*"[^>]*>[^\d]*([\d,]+(?:\.\d+)?)/)
       if (!titleMatch || !linkMatch || !priceMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://www.amazon.eg')
       if (!absUrl) continue
