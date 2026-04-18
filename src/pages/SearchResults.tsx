@@ -199,6 +199,12 @@ const SearchResults = () => {
           <BudgetSlider products={sliderProducts} range={priceRange} onChange={setPriceRange} />
         )}
 
+        {isLoading && displayProducts.length === 0 && (
+          <div data-testid="search-skeleton">
+            <SearchSkeleton />
+          </div>
+        )}
+
         {displayProducts.length > 0 && (
           <div className="space-y-4">
             {displayProducts.map((product, i) => (
