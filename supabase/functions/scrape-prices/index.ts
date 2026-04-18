@@ -802,6 +802,21 @@ Deno.serve(async (req) => {
     }
 
     console.log(`[${store}] Returning ${products.length} products`)
+
+    // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
+    // Logging failures must NEVER crash the search response.
+    try {
+      const logClient = createClient(supabaseUrl, supabaseKey)
+      logClient
+        .from('search_logs')
+        .insert({ query: trimmedQuery, results_count: products.length })
+        .then(({ error }) => {
+          if (error) console.warn(`[${store}] search_logs insert failed:`, error.message)
+        })
+    } catch (logErr) {
+      console.warn(`[${store}] search_logs insert exception:`, logErr)
+    }
+
     return new Response(JSON.stringify({ success: true, products, cached: false, store, usedFallback }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
