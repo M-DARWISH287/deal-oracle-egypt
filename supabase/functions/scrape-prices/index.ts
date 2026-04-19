@@ -10,9 +10,12 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 3
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
-// THE 12-SECOND RULE: native scrapers race against this internal timeout.
-// If exceeded, we immediately fall back to Firecrawl extract mode.
-const NATIVE_RACE_TIMEOUT_MS = 12000
+// ── 3-STAGE INTELLIGENT RETRIEVAL ──
+// Stage 1 (Primary native API): aggressive 3s timeout — fail fast.
+// Stage 2 (Smart retry): same scraper with rotated UA + modified params, 3s timeout.
+// Stage 3 (Firecrawl multi-strategy fallback): waitFor=5s no-scroll → waitFor=9s + scroll + alt prompt.
+const STAGE1_NATIVE_TIMEOUT_MS = 3000
+const STAGE2_NATIVE_TIMEOUT_MS = 3000
 // Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
 // runs in its own edge function invocation (client uses Promise.allSettled), so a
 // long timeout on one store does NOT block the others.
