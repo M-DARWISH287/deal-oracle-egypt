@@ -286,13 +286,18 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
   } finally { clearTimeout(timeout) }
 }
 
-function normalizeProducts(items: Partial<RawProduct>[], storeName: string): RawProduct[] {
+function normalizeProducts(items: Partial<RawProduct>[], storeName: string, query: string): RawProduct[] {
   return items
     .filter(p => {
       if (!p.name || !p.url) return false
       const blob = `${p.name} ${p.specs || ''}`
       if (isAccessory(blob)) return false
       if (isOutOfStock(blob)) return false
+      // GLOBAL RELEVANCE GATE — must pass to enter results.
+      if (!validateRelevance(query, String(p.name))) {
+        console.log(`[${storeName}] Relevance reject: "${String(p.name).slice(0, 80)}"`)
+        return false
+      }
       return true
     })
     .slice(0, 5)
