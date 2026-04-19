@@ -370,37 +370,61 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
     const html = await res.text()
-    const items: Partial<RawProduct>[] = []
+
+    // ── STREAMING extraction: parse one <article class="prd"> at a time, filter
+    // accessories + relevance per node, stop as soon as we have 5 valid products.
+    // Avoids materializing the full DOM and the slice-then-filter bug that dropped
+    // valid phones when the first 50 cards were accessory-heavy.
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
-    const articles = html.match(articleRe) || []
-    for (const a of articles.slice(0, 50)) {
+    const accepted: Partial<RawProduct>[] = []
+    const scores = new Map<string, number>()
+    let scanned = 0
+    let m: RegExpExecArray | null
+    while ((m = articleRe.exec(html)) !== null) {
+      if (accepted.length >= 5) break
+      // Hard cap to avoid pathological pages — but ONLY after streaming through them.
+      if (++scanned > 200) break
+      const a = m[0]
       const hrefMatch =
         a.match(/<a[^>]+class="[^"]*\bcore\b[^"]*"[^>]+href="([^"]+)"/) ||
         a.match(/<a[^>]+href="(\/[^"]+\.html[^"]*)"/)
       const nameMatch =
         a.match(/<h3[^>]*class="[^"]*\bname\b[^"]*"[^>]*>([\s\S]*?)<\/h3>/) ||
         a.match(/data-name="([^"]+)"/)
-      const imgMatch =
-        a.match(/<img[^>]+data-src="([^"]+)"/) ||
-        a.match(/<img[^>]+src="([^"]+)"/)
       if (!hrefMatch || !nameMatch) continue
       const absUrl = toAbsoluteUrl(hrefMatch[1], 'https://www.jumia.com.eg')
       if (!absUrl) continue
+      const name = stripTags(nameMatch[1])
+
+      // Per-node gate: accessory + relevance BEFORE we keep the item.
+      const score = acceptItem(name, undefined, query, 'Jumia')
+      if (score === null) continue
+
       let priceStr: string | null = extractLowestPrice(a)
       if (!priceStr) {
         const prcMatch = a.match(/<div[^>]*class="[^"]*\bprc\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
         if (prcMatch) priceStr = stripTags(prcMatch[1])
       }
       if (!priceStr) continue
-      items.push({
-        name: stripTags(nameMatch[1]),
-        url: absUrl,
-        price: priceStr,
-        image: imgMatch ? imgMatch[1] : '',
-      })
+      const imgMatch =
+        a.match(/<img[^>]+data-src="([^"]+)"/) ||
+        a.match(/<img[^>]+src="([^"]+)"/)
+      accepted.push({ name, url: absUrl, price: priceStr, image: imgMatch ? imgMatch[1] : '' })
+      scores.set(absUrl, score)
     }
-    console.log(`[Jumia native] ${items.length} raw items`)
-    return normalizeProducts(items, 'Jumia', query)
+    console.log(`[Jumia native] streamed ${scanned} cards, accepted ${accepted.length}`)
+    // Pre-validated → bypass relevance double-check, but still apply price floor.
+    return accepted
+      .map(p => {
+        const parsed = parsePrice(p.price as any)
+        return {
+          name: String(p.name), name_ar: String(p.name), price: parsed ?? 0,
+          url: String(p.url), image: p.image || '', specs: '', store: 'Jumia',
+          isRefurbished: checkRefurbished(String(p.name)),
+          confidenceScore: scores.get(String(p.url)) ?? 0,
+        } as RawProduct
+      })
+      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
     console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
     return []
