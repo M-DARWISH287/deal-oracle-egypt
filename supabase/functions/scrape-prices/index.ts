@@ -261,16 +261,19 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string): Raw
 // ════════════════════════════════════════════════════════════════════
 
 // Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
+// MOBILE FOCUS: Jumia's bare search floods accessories. Append "smartphone" to disambiguate
+// AND scan up to 50 cards (defaults of 15 returned 0 phones in practice).
 async function scrapeJumia(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(query)}`
+    const mobileQuery = `${query} smartphone`
+    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
     const articles = html.match(articleRe) || []
-    for (const a of articles.slice(0, 15)) {
+    for (const a of articles.slice(0, 50)) {
       const hrefMatch =
         a.match(/<a[^>]+class="[^"]*\bcore\b[^"]*"[^>]+href="([^"]+)"/) ||
         a.match(/<a[^>]+href="(\/[^"]+\.html[^"]*)"/)
