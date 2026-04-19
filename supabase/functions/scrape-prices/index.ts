@@ -123,6 +123,16 @@ function isAccessory(name: string): boolean {
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
 
+// Out-of-stock detector: drops items whose name/specs blob mentions unavailability.
+const OUT_OF_STOCK_KEYWORDS = [
+  'out of stock', 'sold out', 'unavailable', 'currently unavailable',
+  'نفدت الكمية', 'غير متوفر', 'نفذت الكمية', 'غير متاح',
+]
+function isOutOfStock(blob: string): boolean {
+  const lower = blob.toLowerCase()
+  return OUT_OF_STOCK_KEYWORDS.some(kw => lower.includes(kw))
+}
+
 function decodeHtml(s: string): string {
   return s
     .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'")
