@@ -34,6 +34,9 @@ function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): 
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
+// Stage-2 alternate UA (Firefox/Linux) — different fingerprint from STEALTH_HEADERS Safari/macOS UA.
+const USER_AGENT_ALT = 'Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0'
+
 // Stealth headers used for Amazon / anti-bot stores
 const STEALTH_HEADERS: Record<string, string> = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
@@ -46,6 +49,17 @@ const STEALTH_HEADERS: Record<string, string> = {
   'Sec-Fetch-Mode': 'navigate',
   'Sec-Fetch-Site': 'none',
   'Sec-Fetch-User': '?1',
+  'Upgrade-Insecure-Requests': '1',
+}
+
+// Stage-2 alternate header set: Firefox/Linux UA + en-GB locale + no Sec-Fetch-* hints
+// (different request fingerprint to dodge UA-based rate limits / soft blocks).
+const STEALTH_HEADERS_ALT: Record<string, string> = {
+  'User-Agent': USER_AGENT_ALT,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-GB,en;q=0.5',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'DNT': '1',
   'Upgrade-Insecure-Requests': '1',
 }
 
