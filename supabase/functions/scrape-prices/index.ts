@@ -591,7 +591,9 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // Amazon EG: scope to Mobile Phones node — node 21832883031 confirmed working live.
   'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}&i=electronics&rh=n%3A21832883031`,    method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
   'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,                            method: 'native',    tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrape2B },
+  // 2B Egypt: native scraper PERMANENTLY DISABLED — Magento markup changes + anti-bot
+  // forced a full Firecrawl migration. All queries route directly to Firecrawl.
+  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
   'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'firecrawl', tier: 1 },
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
 }
