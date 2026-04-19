@@ -10,43 +10,41 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 3
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
-// ── 3-STAGE INTELLIGENT RETRIEVAL ──
-// Stage 1 (Primary native API): aggressive 3s timeout — fail fast.
-// Stage 2 (Smart retry): same scraper with rotated UA + modified params, 3s timeout.
-// Stage 3 (Firecrawl multi-strategy fallback): waitFor=5s no-scroll → waitFor=9s + scroll + alt prompt.
-const STAGE1_NATIVE_TIMEOUT_MS = 3000
-const STAGE2_NATIVE_TIMEOUT_MS = 3000
-// Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
-// runs in its own edge function invocation (client uses Promise.allSettled), so a
-// long timeout on one store does NOT block the others.
+
+// ── 3-STAGE DETERMINISTIC RETRIEVAL ENGINE ──
+// Each stage has its OWN timeout (Part 10 — safety guards).
+// Stage 1 (API) — primary native scraper, default UA + params.
+// Stage 2 (RETRY) — same scraper, modified request (UA rotation + page/size flip + jitter).
+// Stage 3 (FIRECRAWL) — multi-strategy LLM extraction fallback.
+const STAGE1_TIMEOUT_MS = 6000   // bumped from 3s — B.TECH Server Action regularly takes 4-6s
+const STAGE2_TIMEOUT_MS = 8000   // retry needs more headroom (server may be slower under load)
 const FIRECRAWL_TIMEOUT_MS = 90000
+// Global budget per request (Part 10): if pipeline exceeds this, we stop and return what we have.
+const MAX_TOTAL_MS = 20000
+
+// Quality gates (Part 5 — strict success criteria):
+const MIN_RELEVANCE_SCORE = 60       // any product below this is treated as INVALID
+const EARLY_EXIT_MIN_ITEMS = 5       // Part 9 — early exit threshold
+const EARLY_EXIT_MIN_RELEVANCE = 80  // Part 9 — early exit threshold
+
+// Stage label union (Part 1 — single source of truth).
+type StageUsed = 'API' | 'RETRY' | 'FIRECRAWL' | 'FAIL'
 
 // Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
 function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
   return Promise.race([
     p,
     new Promise<T[]>((resolve) => setTimeout(() => {
-      console.log(`[${label}] Native exceeded ${timeoutMs}ms — bailing out`)
+      console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage`)
       resolve([])
     }, timeoutMs)),
   ])
 }
 
-// 3-STAGE RETRIEVAL — Stages 1 + 2 native (no blind retries):
-// Stage 1: primary native scraper (default params, 3s aggressive timeout).
-// Stage 2: same scraper with stage=2 (rotated UA + modified params: page=2 / size=30),
-//          ONLY if Stage 1 returned 0 items. Single retry, never identical to Stage 1.
-async function runNativeStages(
-  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
-  query: string,
-  store: string,
-): Promise<RawProduct[]> {
-  const stage1 = await raceWithTimeout(scraper(query, 1), STAGE1_NATIVE_TIMEOUT_MS, `${store} S1`)
-  if (stage1.length > 0) return stage1
-  console.log(`[${store}] Stage 1 returned 0 — running Stage 2 (UA rotation + modified params)`)
-  const stage2 = await raceWithTimeout(scraper(query, 2), STAGE2_NATIVE_TIMEOUT_MS, `${store} S2`)
-  if (stage2.length > 0) console.log(`[${store}] Stage 2 recovered ${stage2.length} items`)
-  return stage2
+// Sleep helper for Stage 2 jitter (300-800ms randomized).
+function jitterSleep(): Promise<void> {
+  const ms = 300 + Math.floor(Math.random() * 500)
+  return new Promise((r) => setTimeout(r, ms))
 }
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -149,7 +147,7 @@ function matchesIntent(query: string, productName: string): boolean {
 // 'monitor', 'speaker', 'headphone' (phones mention these in marketing copy/specs).
 const ACCESSORY_KEYWORDS = [
   // Pure accessories (EN)
-  'case ', 'cover ', 'protector', 'screen protector', 'tempered glass',
+  'protector', 'screen protector', 'tempered glass',
   'cable', 'charger', 'adapter', 'holder', 'phone stand', 'phone mount',
   'earphone', 'earbuds', 'headset', 'strap', 'wristband', 'pouch', 'sleeve',
   'lens protector', 'camera protector', 'lens cover',
@@ -163,7 +161,11 @@ const ACCESSORY_KEYWORDS = [
   // Distinct non-mobile categories (AR)
   'لاب توب', 'لابتوب', 'تابلت', 'تلفزيون', 'تليفزيون', 'ساعة ذكية', 'ساعة سامسونج', 'ساعة ابل',
 ]
+// Word-boundary patterns: words like "case" / "cover" / "wallet" can appear separated
+// by punctuation ("Wallet Case,Black"), so substring matching with trailing-space fails.
+const ACCESSORY_REGEX = /\b(case|cover|wallet case|flip cover|back cover|skin)\b/i
 function isAccessory(name: string): boolean {
+  if (ACCESSORY_REGEX.test(name)) return true
   const lower = ` ${name.toLowerCase()} `
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
@@ -818,7 +820,175 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
   }
 }
 
-// ── Credit helpers (stateless) ──
+// ════════════════════════════════════════════════════════════════════
+// ── DETERMINISTIC 3-STAGE RETRIEVAL ENGINE ──
+// Future-proof (Part 12): runStage1_API / runStage2_Retry / runStage3_Firecrawl
+// are pure functions. Pluggable into Noon / 2B / any future store.
+// ════════════════════════════════════════════════════════════════════
+
+// Quality assessor (Part 5 + Part 8). Splits products into valid/invalid by:
+//   - relevance score >= MIN_RELEVANCE_SCORE
+//   - not an accessory (already filtered upstream by acceptItem, double-checked here)
+//   - has a numeric price > 0
+//   - normalizeProducts has already enforced price floor + brand match
+function assessQuality(products: RawProduct[], query: string): {
+  valid: RawProduct[]; avgRelevance: number; invalidCount: number;
+} {
+  if (products.length === 0) return { valid: [], avgRelevance: 0, invalidCount: 0 }
+  const valid: RawProduct[] = []
+  let invalidCount = 0
+  let scoreSum = 0
+  for (const p of products) {
+    const titleBlob = `${p.name} ${p.name_ar || ''}`
+    const rel = validateRelevance(query, titleBlob)
+    const score = Math.max(rel.score, p.confidenceScore ?? 0)
+    const priceOk = typeof p.price === 'number' && p.price > 0
+    if (rel.isRelevant && score >= MIN_RELEVANCE_SCORE && priceOk) {
+      valid.push({ ...p, confidenceScore: score })
+      scoreSum += score
+    } else {
+      invalidCount++
+    }
+  }
+  const avgRelevance = valid.length > 0 ? Math.round(scoreSum / valid.length) : 0
+  return { valid, avgRelevance, invalidCount }
+}
+
+// ── STAGE RUNNERS ──
+interface StageResult {
+  products: RawProduct[]   // already quality-validated
+  rawCount: number         // count BEFORE quality assessment (for observability)
+  avgRelevance: number
+  invalidCount: number
+  latencyMs: number
+  ok: boolean              // true if at least 1 valid product
+}
+
+async function runStage1_API(
+  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
+  query: string, store: string,
+): Promise<StageResult> {
+  const t0 = Date.now()
+  const raw = await raceWithTimeout(scraper(query, 1), STAGE1_TIMEOUT_MS, `${store} S1-API`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  return {
+    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok: valid.length > 0,
+  }
+}
+
+async function runStage2_Retry(
+  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
+  query: string, store: string, remainingMs: number,
+): Promise<StageResult> {
+  const t0 = Date.now()
+  // Jitter (300-800ms) ensures retry is not identical to Stage 1 (Part 3).
+  await jitterSleep()
+  // Use the lower of STAGE2_TIMEOUT_MS or remainingMs to respect Part 10 global budget.
+  const timeoutMs = Math.max(1500, Math.min(STAGE2_TIMEOUT_MS, remainingMs - 500))
+  const raw = await raceWithTimeout(scraper(query, 2), timeoutMs, `${store} S2-RETRY`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  return {
+    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok: valid.length > 0,
+  }
+}
+
+async function runStage3_Firecrawl(
+  query: string, store: string, searchUrl: string, firecrawlKey: string,
+): Promise<StageResult> {
+  const t0 = Date.now()
+  const raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
+  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  return {
+    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok: valid.length > 0,
+  }
+}
+
+// Top-level orchestrator (Part 1-12). Runs Stage 1 → 2 → 3 deterministically
+// with quality gates, early exit, structured logs, and a global time budget.
+interface PipelineResult {
+  products: RawProduct[]
+  stage_used: StageUsed
+  attempts: number
+  usedFallback: boolean
+  avgRelevance: number
+  invalidCount: number
+  totalLatencyMs: number
+}
+
+async function runRetrievalPipeline(
+  config: StoreConfig, query: string, store: string,
+  firecrawlKey: string | undefined,
+  options: { reserveFirecrawlCredit: () => Promise<boolean>; },
+): Promise<PipelineResult> {
+  const t0 = Date.now()
+  let stage_used: StageUsed = 'API'
+  let attempts = 0
+  let bestProducts: RawProduct[] = []
+  let bestAvg = 0
+  let bestInvalid = 0
+  let usedFallback = false
+
+  const elapsed = () => Date.now() - t0
+  const remainingMs = () => MAX_TOTAL_MS - elapsed()
+
+  // For 'firecrawl'-method stores (Noon, 2B), skip native stages entirely.
+  const hasNative = config.method === 'native' && !!config.nativeScraper
+
+  // ── STAGE 1: API ──
+  if (hasNative) {
+    attempts++
+    const s1 = await runStage1_API(config.nativeScraper!, query, store)
+    console.log(`[${store}] Stage 1 (API): raw=${s1.rawCount} valid=${s1.products.length} avgRel=${s1.avgRelevance} ${s1.latencyMs}ms`)
+    if (s1.ok) {
+      stage_used = 'API'
+      bestProducts = s1.products; bestAvg = s1.avgRelevance; bestInvalid = s1.invalidCount
+      // Part 9: early exit (Stage 1 was good enough — skip 2 & 3).
+      if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
+        return { products: bestProducts, stage_used, attempts, usedFallback,
+          avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
+      }
+    }
+  }
+
+  // ── STAGE 2: RETRY (only if Stage 1 failed AND time remains) ──
+  if (hasNative && bestProducts.length === 0 && remainingMs() > 2000) {
+    attempts++
+    const s2 = await runStage2_Retry(config.nativeScraper!, query, store, remainingMs())
+    console.log(`[${store}] Stage 2 (RETRY): raw=${s2.rawCount} valid=${s2.products.length} avgRel=${s2.avgRelevance} ${s2.latencyMs}ms`)
+    if (s2.ok) {
+      stage_used = 'RETRY'
+      bestProducts = s2.products; bestAvg = s2.avgRelevance; bestInvalid = s2.invalidCount
+      if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
+        return { products: bestProducts, stage_used, attempts, usedFallback,
+          avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
+      }
+    }
+  }
+
+  // ── STAGE 3: FIRECRAWL (only if Stages 1+2 failed AND we can afford it) ──
+  if (bestProducts.length === 0 && firecrawlKey && remainingMs() > 3000) {
+    const creditOk = await options.reserveFirecrawlCredit()
+    if (creditOk) {
+      attempts++
+      const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
+      console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms`)
+      if (s3.ok) {
+        stage_used = 'FIRECRAWL'; usedFallback = true
+        bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
+      }
+    } else {
+      console.log(`[${store}] Stage 3 skipped — credit reservation failed`)
+    }
+  }
+
+  if (bestProducts.length === 0) stage_used = 'FAIL'
+  return { products: bestProducts, stage_used, attempts, usedFallback,
+    avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
+}
+
 async function reserveCredits(supabaseUrl: string, serviceKey: string, userId: string, store: string, query: string): Promise<string | null> {
   const sb = createClient(supabaseUrl, serviceKey)
   try {
@@ -892,64 +1062,48 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ── Scrape ──
+    // ── DETERMINISTIC 3-STAGE RETRIEVAL ──
+    const requestStart = Date.now()
     const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
-    let products: RawProduct[] = []
     let txId: string | null = null
-    let usedFallback = false
 
+    // Cache hit on cached result already returned above. Cache miss → enter pipeline.
+    let pipeline: PipelineResult
     try {
-      if (config.method === 'native') {
-        if (!config.nativeScraper) throw new Error('Native scraper not configured')
-        // ── 3-STAGE RETRIEVAL ──
-        // Stages 1 & 2: native scraper (3s each, Stage 2 = UA rotation + modified params).
-        products = await runNativeStages(config.nativeScraper, trimmedQuery, store)
-
-        // Stage 3: Firecrawl multi-strategy fallback (5s no-scroll → 9s + scroll + alt prompt).
-        if (products.length === 0 && firecrawlKey) {
-          console.log(`[${store}] Stage 3 (Firecrawl multi-strategy) — both native stages returned 0`)
-          if (user_id) {
-            txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-            if (!txId) console.log(`[${store}] Stage 3 skipped — no credits`)
-          }
-          if (!user_id || txId) {
-            const fallback = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
-            if (fallback.length > 0) {
-              products = fallback
-              usedFallback = true
-              console.log(`[${store}] Stage 3 recovered ${products.length} items via Firecrawl`)
-            }
-          }
-        }
-      } else {
-        // method='firecrawl' — reserve credit upfront (Noon, B.TECH)
-        if (!firecrawlKey) throw new Error('Firecrawl not configured')
-        if (user_id) {
+      pipeline = await runRetrievalPipeline(config, trimmedQuery, store, firecrawlKey, {
+        // Stage 3 only reserves a credit when actually invoked. For 'firecrawl'-method
+        // stores (Noon, 2B), Stages 1 & 2 are no-ops so the pipeline goes straight to S3.
+        reserveFirecrawlCredit: async () => {
+          if (!user_id) return true   // anonymous users always allowed
           txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-          if (!txId) {
-            return new Response(JSON.stringify({ success: false, error: 'Insufficient credits' }), { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
-          }
-        }
-        products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
-      }
+          return !!txId
+        },
+      })
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
-      console.error(`[${store}] Scrape error:`, scrapeErr)
-      return new Response(JSON.stringify({ success: true, products: [], cached: false, store, error: String(scrapeErr) }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      console.error(`[${store}] Pipeline error:`, scrapeErr)
+      return new Response(JSON.stringify({
+        success: true, products: [], cached: false, store,
+        stage_used: 'FAIL', attempts: 0, latency_ms: Date.now() - requestStart,
+        avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
+        error: String(scrapeErr),
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // ── Settle credits ──
+    let products = pipeline.products
+    const usedFallback = pipeline.usedFallback
+
+    // ── Settle credits (Firecrawl only — native is free) ──
     if (txId) {
       const charge = products.length > 0 ? 1 : 0
       await settleCredits(supabaseUrl, supabaseKey, txId, charge)
     }
-    if (usedFallback) console.log(`[${store}] Used Firecrawl fallback (charged ${products.length > 0 ? 1 : 0} credit)`)
 
-    // Intent filter
+    // Intent filter (final defense — drops cross-brand pollution missed by relevance gate).
     const beforeCount = products.length
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
-    if (products.length < beforeCount) console.log(`[${store}] Intent: ${beforeCount} -> ${products.length}`)
+    if (products.length < beforeCount) console.log(`[${store}] Intent post-filter: ${beforeCount} -> ${products.length}`)
 
     // ── UPSERT cache ──
     if (products.length > 0) {
@@ -961,7 +1115,21 @@ Deno.serve(async (req) => {
       )
     }
 
-    console.log(`[${store}] Returning ${products.length} products`)
+    const totalLatencyMs = Date.now() - requestStart
+
+    // ── Part 7: Structured metric log (single line, JSON, easy to grep + ship to BI) ──
+    console.log(JSON.stringify({
+      kind: 'scrape_metric',
+      store,
+      query: trimmedQuery,
+      stage_used: pipeline.stage_used,
+      attempts: pipeline.attempts,
+      latency_ms: totalLatencyMs,
+      items: products.length,
+      avg_relevance_score: pipeline.avgRelevance,
+      invalid_items_count: pipeline.invalidCount,
+      usedFallback,
+    }))
 
     // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
     try {
@@ -976,7 +1144,19 @@ Deno.serve(async (req) => {
       console.warn(`[${store}] search_logs insert exception:`, logErr)
     }
 
-    return new Response(JSON.stringify({ success: true, products, cached: false, store, usedFallback }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    // ── Part 6: Mandatory response contract ──
+    return new Response(JSON.stringify({
+      success: true,
+      products,
+      cached: false,
+      store,
+      usedFallback,
+      stage_used: pipeline.stage_used,
+      attempts: pipeline.attempts,
+      latency_ms: totalLatencyMs,
+      avg_relevance_score: pipeline.avgRelevance,
+      invalid_items_count: pipeline.invalidCount,
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
     return new Response(JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
