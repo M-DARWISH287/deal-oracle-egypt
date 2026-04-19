@@ -22,6 +22,8 @@ export const translations = {
     from: 'من',
     poweredByAI: 'مدعوم بالذكاء الاصطناعي',
     priceComparison: 'مقارنة الأسعار',
+    moreResults: 'عرض المزيد من النتائج',
+    hideMoreResults: 'إخفاء النتائج الإضافية',
     language: 'English',
   },
   en: {
@@ -45,6 +47,8 @@ export const translations = {
     from: 'from',
     poweredByAI: 'Powered by AI',
     priceComparison: 'Price Comparison',
+    moreResults: 'Show more results',
+    hideMoreResults: 'Hide more results',
     language: 'العربية',
   },
 } as const;
