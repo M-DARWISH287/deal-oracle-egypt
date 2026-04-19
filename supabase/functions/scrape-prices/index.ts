@@ -5,7 +5,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-const CACHE_TTL_HOURS = 12
+// Global persistent cache TTL: 3h (Supabase-backed `search_cache`, key = store:query).
+// Persistent across cold starts and shared across all edge function invocations.
+const CACHE_TTL_HOURS = 3
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
 // THE 12-SECOND RULE: native scrapers race against this internal timeout.
@@ -312,20 +314,27 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
   } finally { clearTimeout(timeout) }
 }
 
+// Per-item gate used by streaming scrapers: accessory + out-of-stock + relevance.
+// Returns the relevance score on accept, or null on reject.
+function acceptItem(name: string, specs: string | undefined, query: string, storeName: string): number | null {
+  const blob = `${name} ${specs || ''}`
+  if (isAccessory(blob)) return null
+  if (isOutOfStock(blob)) return null
+  const rel = validateRelevance(query, name)
+  if (!rel.isRelevant) {
+    console.log(`[${storeName}] Relevance reject: "${name.slice(0, 80)}"`)
+    return null
+  }
+  return rel.score
+}
+
 function normalizeProducts(items: Partial<RawProduct>[], storeName: string, query: string): RawProduct[] {
   const scored: Array<{ item: Partial<RawProduct>; score: number }> = []
   for (const p of items) {
     if (!p.name || !p.url) continue
-    const blob = `${p.name} ${p.specs || ''}`
-    if (isAccessory(blob)) continue
-    if (isOutOfStock(blob)) continue
-    // GLOBAL RELEVANCE GATE — must pass to enter results.
-    const rel = validateRelevance(query, String(p.name))
-    if (!rel.isRelevant) {
-      console.log(`[${storeName}] Relevance reject: "${String(p.name).slice(0, 80)}"`)
-      continue
-    }
-    scored.push({ item: p, score: rel.score })
+    const score = acceptItem(String(p.name), p.specs, query, storeName)
+    if (score === null) continue
+    scored.push({ item: p, score })
   }
   return scored
     .slice(0, 5)
@@ -361,37 +370,61 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
     const html = await res.text()
-    const items: Partial<RawProduct>[] = []
+
+    // ── STREAMING extraction: parse one <article class="prd"> at a time, filter
+    // accessories + relevance per node, stop as soon as we have 5 valid products.
+    // Avoids materializing the full DOM and the slice-then-filter bug that dropped
+    // valid phones when the first 50 cards were accessory-heavy.
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
-    const articles = html.match(articleRe) || []
-    for (const a of articles.slice(0, 50)) {
+    const accepted: Partial<RawProduct>[] = []
+    const scores = new Map<string, number>()
+    let scanned = 0
+    let m: RegExpExecArray | null
+    while ((m = articleRe.exec(html)) !== null) {
+      if (accepted.length >= 5) break
+      // Hard cap to avoid pathological pages — but ONLY after streaming through them.
+      if (++scanned > 200) break
+      const a = m[0]
       const hrefMatch =
         a.match(/<a[^>]+class="[^"]*\bcore\b[^"]*"[^>]+href="([^"]+)"/) ||
         a.match(/<a[^>]+href="(\/[^"]+\.html[^"]*)"/)
       const nameMatch =
         a.match(/<h3[^>]*class="[^"]*\bname\b[^"]*"[^>]*>([\s\S]*?)<\/h3>/) ||
         a.match(/data-name="([^"]+)"/)
-      const imgMatch =
-        a.match(/<img[^>]+data-src="([^"]+)"/) ||
-        a.match(/<img[^>]+src="([^"]+)"/)
       if (!hrefMatch || !nameMatch) continue
       const absUrl = toAbsoluteUrl(hrefMatch[1], 'https://www.jumia.com.eg')
       if (!absUrl) continue
+      const name = stripTags(nameMatch[1])
+
+      // Per-node gate: accessory + relevance BEFORE we keep the item.
+      const score = acceptItem(name, undefined, query, 'Jumia')
+      if (score === null) continue
+
       let priceStr: string | null = extractLowestPrice(a)
       if (!priceStr) {
         const prcMatch = a.match(/<div[^>]*class="[^"]*\bprc\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
         if (prcMatch) priceStr = stripTags(prcMatch[1])
       }
       if (!priceStr) continue
-      items.push({
-        name: stripTags(nameMatch[1]),
-        url: absUrl,
-        price: priceStr,
-        image: imgMatch ? imgMatch[1] : '',
-      })
+      const imgMatch =
+        a.match(/<img[^>]+data-src="([^"]+)"/) ||
+        a.match(/<img[^>]+src="([^"]+)"/)
+      accepted.push({ name, url: absUrl, price: priceStr, image: imgMatch ? imgMatch[1] : '' })
+      scores.set(absUrl, score)
     }
-    console.log(`[Jumia native] ${items.length} raw items`)
-    return normalizeProducts(items, 'Jumia', query)
+    console.log(`[Jumia native] streamed ${scanned} cards, accepted ${accepted.length}`)
+    // Pre-validated → bypass relevance double-check, but still apply price floor.
+    return accepted
+      .map(p => {
+        const parsed = parsePrice(p.price as any)
+        return {
+          name: String(p.name), name_ar: String(p.name), price: parsed ?? 0,
+          url: String(p.url), image: p.image || '', specs: '', store: 'Jumia',
+          isRefurbished: checkRefurbished(String(p.name)),
+          confidenceScore: scores.get(String(p.url)) ?? 0,
+        } as RawProduct
+      })
+      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
     console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
     return []
@@ -482,32 +515,52 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
 // only the active discount survives, and Math.min picks the lowest.
 async function scrape2B(query: string): Promise<RawProduct[]> {
   try {
-    // Append "smartphone" to disambiguate (avoid accessory-dominated organic ranking)
     const mobileQuery = `${query} smartphone`
     const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(mobileQuery)}`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
     const html = await res.text()
-    const items: Partial<RawProduct>[] = []
+
+    // ── STREAMING extraction: walk <li class="product-item"> sequentially with regex.exec,
+    // filter accessories + relevance per node, stop at 5 valid products. Avoids the
+    // slice(0,50)-then-filter bug where accessory-heavy pages returned 0.
     const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
-    const blocks = html.match(itemRe) || []
-    for (const b of blocks.slice(0, 50)) {
+    const accepted: Partial<RawProduct>[] = []
+    const scores = new Map<string, number>()
+    let scanned = 0
+    let m: RegExpExecArray | null
+    while ((m = itemRe.exec(html)) !== null) {
+      if (accepted.length >= 5) break
+      if (++scanned > 200) break
+      const b = m[0]
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
       if (!linkMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://2b.com.eg')
       if (!absUrl) continue
-      const lowestPrice = extractLowestPrice(b) // strips old-price first
+      const name = stripTags(linkMatch[2])
+
+      // Per-node gate: drop accessories + irrelevant items BEFORE price extraction.
+      const score = acceptItem(name, undefined, query, '2B Egypt')
+      if (score === null) continue
+
+      const lowestPrice = extractLowestPrice(b)
       if (!lowestPrice) continue
-      items.push({
-        name: stripTags(linkMatch[2]),
-        url: absUrl,
-        price: lowestPrice,
-        image: imgMatch ? imgMatch[1] : '',
-      })
+      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
+      accepted.push({ name, url: absUrl, price: lowestPrice, image: imgMatch ? imgMatch[1] : '' })
+      scores.set(absUrl, score)
     }
-    console.log(`[2B native] ${items.length} raw items`)
-    return normalizeProducts(items, '2B Egypt', query)
+    console.log(`[2B native] streamed ${scanned} items, accepted ${accepted.length}`)
+    return accepted
+      .map(p => {
+        const parsed = parsePrice(p.price as any)
+        return {
+          name: String(p.name), name_ar: String(p.name), price: parsed ?? 0,
+          url: String(p.url), image: p.image || '', specs: '', store: '2B Egypt',
+          isRefurbished: checkRefurbished(String(p.name)),
+          confidenceScore: scores.get(String(p.url)) ?? 0,
+        } as RawProduct
+      })
+      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
     return []
@@ -536,17 +589,34 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
 }
 
 // ── Scraper: Firecrawl ──
-async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
+// Multi-stage SPA rendering: waitFor (initial paint) + scroll actions (trigger lazy-loaded
+// product grids) + post-scroll wait. On 0-result, retry with a longer wait + alternate
+// selector hint. waitFor alone is insufficient for React/Magento SPAs like B.TECH/Noon.
+async function callFirecrawlOnce(
+  storeName: string, query: string, searchUrl: string, firecrawlKey: string,
+  opts: { waitFor: number; alternate: boolean },
+): Promise<any[]> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+    // Multi-stage actions: wait for first paint → scroll twice → wait for lazy load.
+    const actions = [
+      { type: 'wait', milliseconds: opts.waitFor },
+      { type: 'scroll', direction: 'down' },
+      { type: 'wait', milliseconds: 1500 },
+      { type: 'scroll', direction: 'down' },
+      { type: 'wait', milliseconds: 1500 },
+    ]
+    const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
+    const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
+    const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${firecrawlKey}`, 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        url: searchUrl, formats: ['extract'],
-        extract: {
+        url: searchUrl,
+        formats: [{
+          type: 'json',
           schema: {
             type: 'object',
             properties: {
@@ -564,21 +634,42 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
             },
             required: ['products'],
           },
-          prompt: `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock). For price, use the active selling price (ignore any crossed-out original price).`,
-        },
-        waitFor: 5000,
+          prompt: opts.alternate ? promptAlt : promptBase,
+        }],
+        actions,
+        waitFor: opts.waitFor,
+        onlyMainContent: false, // SPA grids often live outside <main>
         timeout: 75000,
       }),
     })
     const data = await response.json()
-    if (!response.ok) { console.error(`[Firecrawl] ${storeName} error:`, data); return [] }
-    const products = data?.data?.extract?.products || data?.extract?.products || []
-    console.log(`[Firecrawl] ${storeName}: ${products.length} raw products`)
+    if (!response.ok) {
+      console.error(`[Firecrawl] ${storeName} HTTP ${response.status}:`, JSON.stringify(data).slice(0, 200))
+      return []
+    }
+    return data?.data?.json?.products || data?.json?.products
+        || data?.data?.extract?.products || data?.extract?.products || []
+  } finally { clearTimeout(timeout) }
+}
+
+async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
+  try {
+    // Stage 1: standard SPA render (5s wait + scroll).
+    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false })
+    console.log(`[Firecrawl] ${storeName}: stage-1 returned ${products.length} raw products`)
+
+    // Stage 2: 0 results → retry with extended wait + alternate selector prompt.
+    // Critical for B.TECH (heavy React hydration) and other SPAs.
+    if (products.length === 0) {
+      console.log(`[Firecrawl] ${storeName}: 0 results — retrying with extended wait + alternate selector strategy`)
+      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true })
+      console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
+    }
     return normalizeProducts(products, storeName, query)
   } catch (err) {
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
     return []
-  } finally { clearTimeout(timeout) }
+  }
 }
 
 // ── Credit helpers (stateless) ──
