@@ -1188,20 +1188,66 @@ async function settleCredits(supabaseUrl: string, serviceKey: string, txId: stri
   } catch (err) { console.error('[Credits] Settle error:', err) }
 }
 
+// ── PIPELINE_TRACE EMITTER (Part 2 — failure visibility, no silent fails) ──
+// Emits exactly one structured trace per request lifecycle. Called on every
+// exit path: success, scrape error, outer catch, validation failure.
+interface PipelineTrace {
+  store: string
+  original_query: string
+  normalized_query: string
+  stages_attempted: Array<'API' | 'RETRY' | 'FIRECRAWL'>
+  stage_used: StageUsed | 'NONE'
+  fallback_triggered: boolean
+  fallback_mandatory: boolean
+  fallback_reason: FallbackReason
+  latency_ms: number
+  items_found: number
+  success: boolean
+  error?: string
+}
+function emitPipelineTrace(t: PipelineTrace): void {
+  console.log(JSON.stringify({ kind: 'PIPELINE_TRACE', ...t }))
+}
+
 // ── Main Handler ──
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
 
+  // Captured early so the outer catch can still emit a trace.
+  const handlerStart = Date.now()
+  let traceStore = 'unknown'
+  let traceOriginal = ''
+  let traceNormalized = ''
+
   try {
-    const body = await req.json()
+    const body = await req.json().catch(() => ({}))
     const { query, store, force_refresh } = body
+    traceStore = typeof store === 'string' ? store : 'unknown'
+    traceOriginal = typeof query === 'string' ? query : ''
     // SECURITY: NEVER trust user_id from request body. Always verify via JWT.
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
+      emitPipelineTrace({
+        store: traceStore, original_query: traceOriginal, normalized_query: '',
+        stages_attempted: [], stage_used: 'NONE',
+        fallback_triggered: false, fallback_mandatory: false, fallback_reason: 'NONE',
+        latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+        error: 'QUERY_REQUIRED',
+      })
       return new Response(JSON.stringify({ success: false, error: 'Query is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
     if (!store || !STORE_CONFIGS[store]) {
-      return new Response(JSON.stringify({ success: false, error: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}` }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      emitPipelineTrace({
+        store: traceStore, original_query: traceOriginal, normalized_query: '',
+        stages_attempted: [], stage_used: 'NONE',
+        fallback_triggered: false, fallback_mandatory: false, fallback_reason: 'NONE',
+        latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+        error: 'STORE_NOT_REGISTERED',
+      })
+      return new Response(JSON.stringify({
+        success: false, error: 'STORE_NOT_REGISTERED',
+        message: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}`,
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
@@ -1231,6 +1277,7 @@ Deno.serve(async (req) => {
     // English brand keywords) get hits. Original query preserved for logs/cache key.
     const { execution: normalizedQuery, original: originalQuery } = normalizeQuery(query)
     const trimmedQuery = normalizedQuery.toLowerCase()
+    traceNormalized = trimmedQuery
     // Cache key uses the NORMALIZED query so AR/EN variants of the same intent share cache.
     const cacheKey = `${store}:${trimmedQuery}`
     console.log(`[${store}] original="${originalQuery}" normalized_query="${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
@@ -1245,6 +1292,13 @@ Deno.serve(async (req) => {
 
       if (cached && Array.isArray(cached.results) && cached.results.length > 0) {
         console.log(`[${store}] Cache hit (${cached.results.length} products)`)
+        emitPipelineTrace({
+          store, original_query: originalQuery, normalized_query: trimmedQuery,
+          stages_attempted: [], stage_used: 'API',
+          fallback_triggered: false, fallback_mandatory: false, fallback_reason: 'NONE',
+          latency_ms: Date.now() - handlerStart,
+          items_found: cached.results.length, success: true,
+        })
         return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
       }
     }
@@ -1260,10 +1314,10 @@ Deno.serve(async (req) => {
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     let txId: string | null = null
 
-    // Try expanded queries in order; first variant that returns ≥1 product wins.
-    // Existing pipeline (stage 1/2/3) is invoked unchanged for each variant.
     let pipeline: PipelineResult = {
-      products: [], stage_used: 'FAIL', attempts: 0, usedFallback: false, avgRelevance: 0, invalidCount: 0,
+      products: [], stage_used: 'FAIL', stages_attempted: [], attempts: 0,
+      usedFallback: false, fallback_mandatory: false, fallback_reason: 'NONE',
+      avgRelevance: 0, invalidCount: 0, totalLatencyMs: 0,
     }
     let usedQuery = trimmedQuery
     try {
@@ -1276,14 +1330,17 @@ Deno.serve(async (req) => {
             return !!txId
           },
         })
-        // Accumulate attempts across variants for honest telemetry.
         pipeline = {
           products: res.products,
           stage_used: res.stage_used,
+          stages_attempted: [...pipeline.stages_attempted, ...res.stages_attempted],
           attempts: pipeline.attempts + res.attempts,
           usedFallback: res.usedFallback || pipeline.usedFallback,
+          fallback_mandatory: res.fallback_mandatory || pipeline.fallback_mandatory,
+          fallback_reason: res.products.length > 0 ? 'NONE' : res.fallback_reason,
           avgRelevance: res.avgRelevance,
           invalidCount: res.invalidCount,
+          totalLatencyMs: res.totalLatencyMs,
         }
         usedQuery = variant
         if (res.products.length > 0) break
@@ -1298,10 +1355,20 @@ Deno.serve(async (req) => {
         invalid_items_count: 0, selected_stores: [store], routing_scores: {},
       })
       persistRegressionLog(supabaseUrl, supabaseKey, store, 'FAIL', errLatency, errBenchmark)
+      emitPipelineTrace({
+        store, original_query: originalQuery, normalized_query: trimmedQuery,
+        stages_attempted: pipeline.stages_attempted, stage_used: 'FAIL',
+        fallback_triggered: pipeline.usedFallback,
+        fallback_mandatory: true, fallback_reason: 'NATIVE_ERROR',
+        latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+        error: scrapeErr instanceof Error ? scrapeErr.message : String(scrapeErr),
+      })
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
         stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
+        fallback_mandatory: true, fallback_reason: 'NATIVE_ERROR',
+        stages_attempted: pipeline.stages_attempted,
         semantic_intent: intent, expanded_queries_count: expanded.length,
         error: String(scrapeErr),
         benchmark: errBenchmark,
@@ -1360,6 +1427,9 @@ Deno.serve(async (req) => {
       query: trimmedQuery,
       used_query: usedQuery,
       stage_used: pipeline.stage_used,
+      stages_attempted: pipeline.stages_attempted,
+      fallback_mandatory: pipeline.fallback_mandatory,
+      fallback_reason: pipeline.fallback_reason,
       attempts: pipeline.attempts,
       latency_ms: totalLatencyMs,
       items: products.length,
@@ -1387,7 +1457,19 @@ Deno.serve(async (req) => {
     // ── Persist benchmark to regression_logs (fire-and-forget) ──
     persistRegressionLog(supabaseUrl, supabaseKey, store, pipeline.stage_used, totalLatencyMs, benchmark)
 
-    // ── Part 6: Mandatory response contract (Phase 4 fields are ADDITIVE) ──
+    // ── Final PIPELINE_TRACE — one per request, even on FAIL stage ──
+    emitPipelineTrace({
+      store, original_query: originalQuery, normalized_query: trimmedQuery,
+      stages_attempted: pipeline.stages_attempted,
+      stage_used: pipeline.stage_used,
+      fallback_triggered: usedFallback,
+      fallback_mandatory: pipeline.fallback_mandatory,
+      fallback_reason: pipeline.fallback_reason,
+      latency_ms: Date.now() - handlerStart,
+      items_found: products.length,
+      success: products.length > 0,
+    })
+
     return new Response(JSON.stringify({
       success: true,
       products,
@@ -1395,19 +1477,35 @@ Deno.serve(async (req) => {
       store,
       usedFallback,
       stage_used: pipeline.stage_used,
+      stages_attempted: pipeline.stages_attempted,
+      fallback_mandatory: pipeline.fallback_mandatory,
+      fallback_reason: pipeline.fallback_reason,
       attempts: pipeline.attempts,
       latency_ms: totalLatencyMs,
       avg_relevance_score: pipeline.avgRelevance,
       invalid_items_count: pipeline.invalidCount,
-      // Phase 4 — additive semantic telemetry
       semantic_intent: intent,
       expanded_queries_count: expanded.length,
       used_query: usedQuery,
-      // Post-mortem self-evaluation
       benchmark,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
+    // Outer catch — even an unexpected crash MUST leave a PIPELINE_TRACE.
     console.error('Error:', error)
-    return new Response(JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    emitPipelineTrace({
+      store: traceStore, original_query: traceOriginal, normalized_query: traceNormalized,
+      stages_attempted: [], stage_used: 'FAIL',
+      fallback_triggered: false, fallback_mandatory: false,
+      fallback_reason: 'INVALID_RESPONSE',
+      latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return new Response(JSON.stringify({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stage_used: 'FAIL',
+      fallback_mandatory: false,
+      fallback_reason: 'INVALID_RESPONSE',
+    }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   }
 })
