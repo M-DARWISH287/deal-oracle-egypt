@@ -173,26 +173,51 @@ function tokenizeForRelevance(s: string): string[] {
     .filter(t => t.length >= 2)
 }
 
-export function validateRelevance(query: string, title: string): boolean {
+export interface RelevanceResult {
+  isRelevant: boolean;
+  score: number;
+}
+
+export function validateRelevance(query: string, title: string): RelevanceResult {
   const qTokens = tokenizeForRelevance(query)
   const tTokens = tokenizeForRelevance(title)
-  if (qTokens.length === 0 || tTokens.length === 0) return false
+  if (qTokens.length === 0 || tTokens.length === 0) return { isRelevant: false, score: 0 }
 
   const tSet = new Set(tTokens)
   const qNumbers = qTokens.filter(t => /^\d+$/.test(t))
   const qWords = qTokens.filter(t => !/^\d+$/.test(t))
 
-  // Rule 3: every query number MUST appear verbatim. Strict numeric match.
+  // Rule 3: every query number MUST appear verbatim. Strict numeric match (instant fail).
   for (const n of qNumbers) {
-    if (!tSet.has(n)) return false
+    if (!tSet.has(n)) return { isRelevant: false, score: 0 }
   }
 
   // Rule 4: word overlap. Require ≥60% of query words to appear in title.
-  if (qWords.length === 0) return qNumbers.length > 0 // numbers-only query already validated
+  const allQ = qWords.length > 0 ? qWords : qNumbers
   let hits = 0
   for (const w of qWords) if (tSet.has(w)) hits++
-  const required = Math.max(1, Math.ceil(qWords.length * 0.6))
-  return hits >= required
+  // numeric tokens already validated above as present, count them as hits too
+  const numericHits = qNumbers.length
+  const totalHits = hits + numericHits
+  const totalQ = qWords.length + qNumbers.length
+  const overlapPct = totalQ > 0 ? (totalHits / totalQ) * 100 : 0
+
+  // Substring bonus: full normalized query found inside normalized title
+  const normQ = normalizeForRelevance(query).trim()
+  const normT = normalizeForRelevance(title)
+  const substringBonus = normQ.length > 0 && normT.includes(normQ) ? 20 : 0
+
+  const score = Math.min(100, Math.round(overlapPct + substringBonus))
+
+  // Gate: numbers required (already enforced) + ≥60% word overlap when words exist
+  let isRelevant: boolean
+  if (qWords.length === 0) {
+    isRelevant = qNumbers.length > 0
+  } else {
+    const required = Math.max(1, Math.ceil(qWords.length * 0.6))
+    isRelevant = hits >= required
+  }
+  return { isRelevant, score }
 }
 
 function decodeHtml(s: string): string {
