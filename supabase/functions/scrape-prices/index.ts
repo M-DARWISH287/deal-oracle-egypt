@@ -1129,6 +1129,9 @@ Deno.serve(async (req) => {
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
     if (products.length < beforeCount) console.log(`[${store}] Intent post-filter: ${beforeCount} -> ${products.length}`)
 
+    // ── PHASE 4 — semantic re-ranking (additive: re-orders, never deletes) ──
+    products = semanticRerank(products as any, intent) as typeof products
+
     // ── UPSERT cache ──
     if (products.length > 0) {
       const writeClient = createClient(supabaseUrl, supabaseKey)
@@ -1141,11 +1144,12 @@ Deno.serve(async (req) => {
 
     const totalLatencyMs = Date.now() - requestStart
 
-    // ── Part 7: Structured metric log (single line, JSON, easy to grep + ship to BI) ──
+    // ── Part 7: Structured metric log + Phase 4 semantic telemetry (additive fields) ──
     console.log(JSON.stringify({
       kind: 'scrape_metric',
       store,
       query: trimmedQuery,
+      used_query: usedQuery,
       stage_used: pipeline.stage_used,
       attempts: pipeline.attempts,
       latency_ms: totalLatencyMs,
@@ -1153,6 +1157,8 @@ Deno.serve(async (req) => {
       avg_relevance_score: pipeline.avgRelevance,
       invalid_items_count: pipeline.invalidCount,
       usedFallback,
+      semantic_intent: intent,
+      expanded_queries_count: expanded.length,
     }))
 
     // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
@@ -1168,7 +1174,7 @@ Deno.serve(async (req) => {
       console.warn(`[${store}] search_logs insert exception:`, logErr)
     }
 
-    // ── Part 6: Mandatory response contract ──
+    // ── Part 6: Mandatory response contract (Phase 4 fields are ADDITIVE) ──
     return new Response(JSON.stringify({
       success: true,
       products,
@@ -1180,6 +1186,10 @@ Deno.serve(async (req) => {
       latency_ms: totalLatencyMs,
       avg_relevance_score: pipeline.avgRelevance,
       invalid_items_count: pipeline.invalidCount,
+      // Phase 4 — additive semantic telemetry
+      semantic_intent: intent,
+      expanded_queries_count: expanded.length,
+      used_query: usedQuery,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
