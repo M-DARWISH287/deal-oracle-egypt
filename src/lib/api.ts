@@ -186,6 +186,10 @@ export function clientFilterWithFallback(
     // Drop accessories
     if (ACCESSORY_KEYWORDS_CLIENT.some(kw => nameLower.includes(kw))) continue;
 
+    // GLOBAL RELEVANCE GATE — reject anything whose title doesn't match the query.
+    const titleForRelevance = `${clone.name.en} ${clone.name.ar}`;
+    if (!validateRelevance(query, titleForRelevance)) continue;
+
     // Strict brand matching: drop cross-brand pollution
     let brandMismatch = false;
     for (const [brandKw, excluded] of Object.entries(BRAND_EXCLUSIONS)) {
