@@ -628,7 +628,7 @@ async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<Ra
     console.log(`[${tag}] ${items.length} raw items, ${cards.length} cards`)
     return normalizeProducts(items, 'Amazon Egypt', query)
   } catch (err) {
-    console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
+    console.error(`[${tag}] error:`, err instanceof Error ? err.message : err)
     return []
   }
 }
