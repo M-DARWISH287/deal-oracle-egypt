@@ -1064,24 +1064,45 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ── DETERMINISTIC 3-STAGE RETRIEVAL ──
+    // ── PHASE 4 — SEMANTIC LAYER (runs BEFORE the pipeline; pipeline contract unchanged) ──
+    const intent: SemanticIntent = canonicalizeQuery(trimmedQuery)
+    const expanded = expandQueries(intent, 4)
+    console.log(`[${store}] semantic intent=${JSON.stringify(intent.entities)} conf=${intent.confidence} expanded=${expanded.length}`)
+
+    // ── DETERMINISTIC 3-STAGE RETRIEVAL — driven by semantic-expanded queries ──
     const requestStart = Date.now()
     const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     let txId: string | null = null
 
-    // Cache hit on cached result already returned above. Cache miss → enter pipeline.
-    let pipeline: PipelineResult
+    // Try expanded queries in order; first variant that returns ≥1 product wins.
+    // Existing pipeline (stage 1/2/3) is invoked unchanged for each variant.
+    let pipeline: PipelineResult = {
+      products: [], stage_used: 'FAIL', attempts: 0, usedFallback: false, avgRelevance: 0, invalidCount: 0,
+    }
+    let usedQuery = trimmedQuery
     try {
-      pipeline = await runRetrievalPipeline(config, trimmedQuery, store, firecrawlKey, {
-        // Stage 3 only reserves a credit when actually invoked. For 'firecrawl'-method
-        // stores (Noon, 2B), Stages 1 & 2 are no-ops so the pipeline goes straight to S3.
-        reserveFirecrawlCredit: async () => {
-          if (!user_id) return true   // anonymous users always allowed
-          txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-          return !!txId
-        },
-      })
+      for (const variant of expanded) {
+        if (Date.now() - requestStart > MAX_TOTAL_MS - 1000) break
+        const res = await runRetrievalPipeline(config, variant, store, firecrawlKey, {
+          reserveFirecrawlCredit: async () => {
+            if (!user_id) return true
+            txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, variant)
+            return !!txId
+          },
+        })
+        // Accumulate attempts across variants for honest telemetry.
+        pipeline = {
+          products: res.products,
+          stage_used: res.stage_used,
+          attempts: pipeline.attempts + res.attempts,
+          usedFallback: res.usedFallback || pipeline.usedFallback,
+          avgRelevance: res.avgRelevance,
+          invalidCount: res.invalidCount,
+        }
+        usedQuery = variant
+        if (res.products.length > 0) break
+      }
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
       console.error(`[${store}] Pipeline error:`, scrapeErr)
@@ -1089,6 +1110,7 @@ Deno.serve(async (req) => {
         success: true, products: [], cached: false, store,
         stage_used: 'FAIL', attempts: 0, latency_ms: Date.now() - requestStart,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
+        semantic_intent: intent, expanded_queries_count: expanded.length,
         error: String(scrapeErr),
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
