@@ -10,43 +10,41 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 3
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
-// ── 3-STAGE INTELLIGENT RETRIEVAL ──
-// Stage 1 (Primary native API): aggressive 3s timeout — fail fast.
-// Stage 2 (Smart retry): same scraper with rotated UA + modified params, 3s timeout.
-// Stage 3 (Firecrawl multi-strategy fallback): waitFor=5s no-scroll → waitFor=9s + scroll + alt prompt.
-const STAGE1_NATIVE_TIMEOUT_MS = 3000
-const STAGE2_NATIVE_TIMEOUT_MS = 3000
-// Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
-// runs in its own edge function invocation (client uses Promise.allSettled), so a
-// long timeout on one store does NOT block the others.
+
+// ── 3-STAGE DETERMINISTIC RETRIEVAL ENGINE ──
+// Each stage has its OWN timeout (Part 10 — safety guards).
+// Stage 1 (API) — primary native scraper, default UA + params.
+// Stage 2 (RETRY) — same scraper, modified request (UA rotation + page/size flip + jitter).
+// Stage 3 (FIRECRAWL) — multi-strategy LLM extraction fallback.
+const STAGE1_TIMEOUT_MS = 6000   // bumped from 3s — B.TECH Server Action regularly takes 4-6s
+const STAGE2_TIMEOUT_MS = 8000   // retry needs more headroom (server may be slower under load)
 const FIRECRAWL_TIMEOUT_MS = 90000
+// Global budget per request (Part 10): if pipeline exceeds this, we stop and return what we have.
+const MAX_TOTAL_MS = 20000
+
+// Quality gates (Part 5 — strict success criteria):
+const MIN_RELEVANCE_SCORE = 60       // any product below this is treated as INVALID
+const EARLY_EXIT_MIN_ITEMS = 5       // Part 9 — early exit threshold
+const EARLY_EXIT_MIN_RELEVANCE = 80  // Part 9 — early exit threshold
+
+// Stage label union (Part 1 — single source of truth).
+type StageUsed = 'API' | 'RETRY' | 'FIRECRAWL' | 'FAIL'
 
 // Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
 function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
   return Promise.race([
     p,
     new Promise<T[]>((resolve) => setTimeout(() => {
-      console.log(`[${label}] Native exceeded ${timeoutMs}ms — bailing out`)
+      console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage`)
       resolve([])
     }, timeoutMs)),
   ])
 }
 
-// 3-STAGE RETRIEVAL — Stages 1 + 2 native (no blind retries):
-// Stage 1: primary native scraper (default params, 3s aggressive timeout).
-// Stage 2: same scraper with stage=2 (rotated UA + modified params: page=2 / size=30),
-//          ONLY if Stage 1 returned 0 items. Single retry, never identical to Stage 1.
-async function runNativeStages(
-  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
-  query: string,
-  store: string,
-): Promise<RawProduct[]> {
-  const stage1 = await raceWithTimeout(scraper(query, 1), STAGE1_NATIVE_TIMEOUT_MS, `${store} S1`)
-  if (stage1.length > 0) return stage1
-  console.log(`[${store}] Stage 1 returned 0 — running Stage 2 (UA rotation + modified params)`)
-  const stage2 = await raceWithTimeout(scraper(query, 2), STAGE2_NATIVE_TIMEOUT_MS, `${store} S2`)
-  if (stage2.length > 0) console.log(`[${store}] Stage 2 recovered ${stage2.length} items`)
-  return stage2
+// Sleep helper for Stage 2 jitter (300-800ms randomized).
+function jitterSleep(): Promise<void> {
+  const ms = 300 + Math.floor(Math.random() * 500)
+  return new Promise((r) => setTimeout(r, ms))
 }
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
