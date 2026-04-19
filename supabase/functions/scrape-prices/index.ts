@@ -314,20 +314,27 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
   } finally { clearTimeout(timeout) }
 }
 
+// Per-item gate used by streaming scrapers: accessory + out-of-stock + relevance.
+// Returns the relevance score on accept, or null on reject.
+function acceptItem(name: string, specs: string | undefined, query: string, storeName: string): number | null {
+  const blob = `${name} ${specs || ''}`
+  if (isAccessory(blob)) return null
+  if (isOutOfStock(blob)) return null
+  const rel = validateRelevance(query, name)
+  if (!rel.isRelevant) {
+    console.log(`[${storeName}] Relevance reject: "${name.slice(0, 80)}"`)
+    return null
+  }
+  return rel.score
+}
+
 function normalizeProducts(items: Partial<RawProduct>[], storeName: string, query: string): RawProduct[] {
   const scored: Array<{ item: Partial<RawProduct>; score: number }> = []
   for (const p of items) {
     if (!p.name || !p.url) continue
-    const blob = `${p.name} ${p.specs || ''}`
-    if (isAccessory(blob)) continue
-    if (isOutOfStock(blob)) continue
-    // GLOBAL RELEVANCE GATE — must pass to enter results.
-    const rel = validateRelevance(query, String(p.name))
-    if (!rel.isRelevant) {
-      console.log(`[${storeName}] Relevance reject: "${String(p.name).slice(0, 80)}"`)
-      continue
-    }
-    scored.push({ item: p, score: rel.score })
+    const score = acceptItem(String(p.name), p.specs, query, storeName)
+    if (score === null) continue
+    scored.push({ item: p, score })
   }
   return scored
     .slice(0, 5)
