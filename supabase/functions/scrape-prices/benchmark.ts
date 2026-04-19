@@ -174,8 +174,14 @@ function scoreExpansionQuality(input: BenchmarkInput): { score: number; issues: 
 
   // (d) used_query is not the destructive "family+num without variant" form.
   if (variant && used_query) {
+    const variantAr2: Record<string, string> = {
+      'pro max': 'برو ماكس', ultra: 'الترا', plus: 'بلس', pro: 'برو',
+      mini: 'ميني', lite: 'لايت', fe: 'fe',
+    }
+    const arForm = variantAr2[variant]
     const lu = used_query.toLowerCase()
-    const looksReductive = (!!family && lu.includes(family) || !!num && lu.includes(num)) && !lu.includes(variant)
+    const hasVariantToken = lu.includes(variant) || (arForm ? lu.includes(arForm) : false)
+    const looksReductive = ((!!family && lu.includes(family)) || (!!num && lu.includes(num))) && !hasVariantToken
     if (!looksReductive) { s += 10; strengths.push('non-destructive used_query') }
     else issues.push(`used_query "${used_query}" stripped variant`)
   } else {
