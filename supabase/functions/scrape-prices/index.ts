@@ -566,9 +566,6 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
     return []
   }
 }
-    return []
-  }
-}
 
 // ════════════════════════════════════════════════════════════════════
 // BIG 5 STORE CONFIG
