@@ -137,6 +137,63 @@ function isOutOfStock(blob: string): boolean {
   return OUT_OF_STOCK_KEYWORDS.some(kw => lower.includes(kw))
 }
 
+// ── GLOBAL RELEVANCE VALIDATOR ──
+// Generic, brand-agnostic, scalable. No hardcoded brand lists, no category assumptions.
+// Rules:
+//   1. Normalize: case-fold, strip diacritics, fold Arabic letter variants (أإآ→ا, ى→ي, ة→ه).
+//   2. Tokenize: split on whitespace + punctuation, drop tokens shorter than 2 chars.
+//   3. Numeric tokens MUST match exactly. Query "11" must NOT match title "15".
+//      Every numeric token in the query must appear verbatim in the title.
+//   4. Non-numeric tokens: require ≥60% overlap (rounded up). For 1-token queries,
+//      that single token must be present.
+function normalizeForRelevance(s: string): string {
+  if (!s) return ''
+  return s
+    .toLowerCase()
+    // Convert Arabic-Indic digits → ASCII so "١٥" matches "15"
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
+    // Strip Arabic diacritics (tashkeel) and tatweel
+    .replace(/[\u064B-\u0652\u0670\u0640]/g, '')
+    // Fold Arabic letter variants
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
+    .replace(/ة/g, 'ه')
+    // Strip Latin combining marks (NFD then remove diacritics)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function tokenizeForRelevance(s: string): string[] {
+  return normalizeForRelevance(s)
+    .split(/[^a-z0-9\u0600-\u06FF]+/)
+    .filter(t => t.length >= 2)
+}
+
+export function validateRelevance(query: string, title: string): boolean {
+  const qTokens = tokenizeForRelevance(query)
+  const tTokens = tokenizeForRelevance(title)
+  if (qTokens.length === 0 || tTokens.length === 0) return false
+
+  const tSet = new Set(tTokens)
+  const qNumbers = qTokens.filter(t => /^\d+$/.test(t))
+  const qWords = qTokens.filter(t => !/^\d+$/.test(t))
+
+  // Rule 3: every query number MUST appear verbatim. Strict numeric match.
+  for (const n of qNumbers) {
+    if (!tSet.has(n)) return false
+  }
+
+  // Rule 4: word overlap. Require ≥60% of query words to appear in title.
+  if (qWords.length === 0) return qNumbers.length > 0 // numbers-only query already validated
+  let hits = 0
+  for (const w of qWords) if (tSet.has(w)) hits++
+  const required = Math.max(1, Math.ceil(qWords.length * 0.6))
+  return hits >= required
+}
+
 function decodeHtml(s: string): string {
   return s
     .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'")
