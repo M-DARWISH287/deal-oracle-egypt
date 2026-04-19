@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { ExternalLink, Copy, Check, Tag, RefreshCw, Repeat } from 'lucide-react';
+import { ExternalLink, Copy, Check, Tag, RefreshCw, Repeat, Sparkles } from 'lucide-react';
 import { useLanguage } from '@/i18n/LanguageContext';
 import type { Product } from '@/lib/api';
+import type { RankedProduct, ScoredOffer } from '@/lib/decisionEngine';
 import { Badge } from '@/components/ui/badge';
 
 const STORE_LOGOS: Record<string, string> = {
@@ -14,16 +15,31 @@ const STORE_LOGOS: Record<string, string> = {
 };
 
 interface ProductCardProps {
-  product: Product;
+  product: Product | RankedProduct;
   index: number;
+}
+
+// Type guard: does this offer carry the decision-engine score fields?
+function isScoredOffer(o: unknown): o is ScoredOffer {
+  return !!o && typeof (o as ScoredOffer).score === 'number';
 }
 
 export function ProductCard({ product, index }: ProductCardProps) {
   const { lang, t } = useLanguage();
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
 
-  const sortedOffers = [...product.offers].sort((a, b) => a.price - b.price);
-  const bestPrice = sortedOffers[0];
+  // If the engine scored the offers, sort by composite score (best value first).
+  // Otherwise fall back to legacy price-only sort so older callers still work.
+  const sortedOffers = [...product.offers].sort((a, b) => {
+    if (isScoredOffer(a) && isScoredOffer(b)) {
+      return (b.score - a.score) || (a.price - b.price);
+    }
+    return a.price - b.price;
+  });
+  const headlineOffer = sortedOffers[0];
+  const cheapestPrice = Math.min(...product.offers.map(o => o.price));
+  const isBestValueDifferentFromCheapest =
+    isScoredOffer(headlineOffer) && headlineOffer.price > cheapestPrice;
 
   const copyLink = async (url: string) => {
     await navigator.clipboard.writeText(url);
