@@ -857,36 +857,23 @@ function noonProductUrl(hit: NoonHit): string | null {
   return null
 }
 
-// Force HTTP/1.1 — Noon's edge (Akamai) closes HTTP/2 streams from Deno's TLS
-// fingerprint with "internal error". A dedicated http1-only client sidesteps this.
-let _noonClient: Deno.HttpClient | null = null
-function getNoonClient(): Deno.HttpClient | null {
-  if (_noonClient) return _noonClient
-  try {
-    // @ts-ignore — http2 flag is supported in Deno Deploy / Edge runtime.
-    _noonClient = Deno.createHttpClient({ http2: false, http1: true })
-    return _noonClient
-  } catch {
-    return null  // runtime doesn't support custom clients — fall back to default fetch
-  }
-}
-
 async function fetchNoonOnce(url: string, attempt: number): Promise<Response | null> {
   const controller = new AbortController()
   const t = setTimeout(() => controller.abort(), NOON_TIMEOUT_MS)
   try {
+    // Minimal browser-like headers. Noon's Akamai edge aggressively rejects
+    // datacenter IPs (HTTP 403) and Deno's HTTP/2 TLS fingerprint (stream error).
+    // We still attempt a clean fetch — on rejection, we exit with EMPTY_RESULT
+    // and the pipeline returns deterministically within the 2s timeout.
     const ua = attempt % 2 === 0 ? USER_AGENT : USER_AGENT_ALT
-    const client = getNoonClient()
-    const init: RequestInit & { client?: Deno.HttpClient } = {
+    return await fetch(url, {
       signal: controller.signal,
       headers: {
         'User-Agent': ua,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
       },
-    }
-    if (client) init.client = client
-    return await fetch(url, init)
+    })
   } catch (err) {
     console.warn(`[Noon native] attempt ${attempt + 1} fetch failed:`, err instanceof Error ? err.message : err)
     return null
