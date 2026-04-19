@@ -1298,12 +1298,18 @@ async function runRetrievalPipeline(
     }
   }
 
-  // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE) ──
+  // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE, except for Noon) ──
   // Per safety rule: if native/API failed OR returned empty, Firecrawl MUST be attempted.
-  // Only blockers allowed: missing API key, exhausted time budget, denied credit reservation.
+  // EXCEPTION: Noon is native-only — Firecrawl was removed (500 lifetime + 2 concurrency cap).
+  // For Noon, an empty Stage 1/2 means EMPTY_RESULT and we exit cleanly.
+  // Other allowed blockers: missing API key, exhausted time budget, denied credit reservation.
   const fallback_mandatory = bestProducts.length === 0
+  const NATIVE_ONLY_STORES = new Set(['Noon'])
   if (fallback_mandatory) {
-    if (!firecrawlKey) {
+    if (NATIVE_ONLY_STORES.has(store)) {
+      fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
+      console.log(`[${store}] Stage 3 SKIPPED — store is native-only (Firecrawl removed). reason=${fallback_reason}`)
+    } else if (!firecrawlKey) {
       fallback_reason = 'KEY_MISSING'
       console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
     } else if (remainingMs() <= 3000) {
