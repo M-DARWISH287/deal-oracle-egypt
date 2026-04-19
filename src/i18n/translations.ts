@@ -8,6 +8,7 @@ export const translations = {
     searchButton: 'ابحث',
     trending: 'عمليات بحث رائجة',
     bestPrice: 'أفضل سعر',
+    bestValue: 'أفضل قيمة',
     buy: 'اشتري',
     copyLink: 'نسخ الرابط',
     copied: 'تم النسخ!',
