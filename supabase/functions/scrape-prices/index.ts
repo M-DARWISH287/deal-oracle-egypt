@@ -816,10 +816,185 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
   }
 }
 
+// ── Noon: native HTML scraper (Firecrawl REMOVED for Noon) ──
+// Noon serves a Next.js SSR product grid. We parse the __NEXT_DATA__ JSON blob
+// (most stable surface — present on every search page) and fall back to a DOM
+// scan of `.productContainer` cards if the blob shape rotates.
+// HARD requirements: 2s per-attempt timeout, exponential backoff (2 retries max),
+// returns [] on any failure (never null), preserves PIPELINE_TRACE observability.
+const NOON_TIMEOUT_MS = 2000
+const NOON_MAX_RETRIES = 2
+
+interface NoonHit {
+  name?: string
+  nameEn?: string
+  nameAr?: string
+  productTitle?: string
+  brand?: string
+  url?: string
+  productUrl?: string
+  imageKey?: string
+  image?: string
+  imageUrl?: string
+  sku?: string
+  offerCode?: string
+  price?: number | string
+  salePrice?: number | string
+  finalPrice?: number | string
+}
+
+function noonImageFromKey(key: string | undefined): string {
+  if (!key) return ''
+  if (/^https?:\/\//i.test(key)) return key
+  return `https://f.nooncdn.com/p/${key.replace(/^\/+/, '')}`
+}
+
+function noonProductUrl(hit: NoonHit): string | null {
+  if (hit.productUrl && /^https?:\/\//i.test(hit.productUrl)) return hit.productUrl
+  if (hit.url && /^https?:\/\//i.test(hit.url)) return hit.url
+  if (hit.url) return toAbsoluteUrl(hit.url, 'https://www.noon.com')
+  if (hit.sku) return `https://www.noon.com/egypt-en/${hit.sku}/p/`
+  return null
+}
+
+async function fetchNoonOnce(url: string, attempt: number): Promise<Response | null> {
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), NOON_TIMEOUT_MS)
+  try {
+    // Minimal browser-like headers. Noon's Akamai edge aggressively rejects
+    // datacenter IPs (HTTP 403) and Deno's HTTP/2 TLS fingerprint (stream error).
+    // We still attempt a clean fetch — on rejection, we exit with EMPTY_RESULT
+    // and the pipeline returns deterministically within the 2s timeout.
+    const ua = attempt % 2 === 0 ? USER_AGENT : USER_AGENT_ALT
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+      },
+    })
+  } catch (err) {
+    console.warn(`[Noon native] attempt ${attempt + 1} fetch failed:`, err instanceof Error ? err.message : err)
+    return null
+  } finally { clearTimeout(t) }
+}
+
+async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
+  const tag = 'Noon native'
+  const url = `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(query)}`
+
+  // Up to 1 + NOON_MAX_RETRIES attempts with exponential backoff (200ms, 500ms).
+  let html: string | null = null
+  for (let attempt = 0; attempt <= NOON_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const backoff = Math.min(500, 200 * 2 ** (attempt - 1))
+      await new Promise(r => setTimeout(r, backoff))
+    }
+    const res = await fetchNoonOnce(url, attempt)
+    if (!res) continue
+    if (res.status === 429 || res.status >= 500) {
+      console.log(`[${tag}] attempt ${attempt + 1} HTTP ${res.status} — retrying`)
+      continue
+    }
+    if (!res.ok) { console.log(`[${tag}] HTTP ${res.status} (non-retryable)`); return [] }
+    try {
+      html = await res.text()
+      break
+    } catch (err) {
+      console.warn(`[${tag}] body read failed:`, err)
+      continue
+    }
+  }
+  if (!html) { console.warn(`[${tag}] all ${NOON_MAX_RETRIES + 1} attempts failed`); return [] }
+
+  // ── Strategy A: __NEXT_DATA__ JSON blob (most reliable) ──
+  const hits: NoonHit[] = []
+  const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+  if (nextDataMatch) {
+    try {
+      const parsed = JSON.parse(nextDataMatch[1])
+      // Walk the tree — Noon nests hits under different keys depending on layout.
+      const seen = new WeakSet<object>()
+      const walk = (node: unknown): void => {
+        if (!node || typeof node !== 'object') return
+        if (seen.has(node as object)) return
+        seen.add(node as object)
+        if (Array.isArray(node)) { for (const v of node) walk(v); return }
+        const obj = node as Record<string, unknown>
+        // Heuristic: an object with a price + (name | productTitle | nameEn) is a product hit.
+        const hasName = typeof obj.name === 'string' || typeof obj.nameEn === 'string' ||
+                        typeof obj.productTitle === 'string'
+        const hasPrice = obj.price !== undefined || obj.salePrice !== undefined ||
+                         obj.finalPrice !== undefined
+        if (hasName && hasPrice) hits.push(obj as NoonHit)
+        for (const v of Object.values(obj)) walk(v)
+      }
+      walk(parsed)
+    } catch (err) {
+      console.warn(`[${tag}] __NEXT_DATA__ parse failed:`, err instanceof Error ? err.message : err)
+    }
+  }
+
+  // ── Strategy B: DOM fallback if the JSON blob yielded nothing ──
+  if (hits.length === 0) {
+    const cardRe = /<div[^>]*class="[^"]*\bproductContainer\b[^"]*"[\s\S]*?<\/div>\s*<\/div>/gi
+    let m: RegExpExecArray | null
+    let scanned = 0
+    while ((m = cardRe.exec(html)) !== null && scanned < 60) {
+      scanned++
+      const card = m[0]
+      const linkMatch = card.match(/<a[^>]+href="([^"]+)"/)
+      const titleMatch = card.match(/<div[^>]*class="[^"]*\bname\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i) ||
+                         card.match(/<h[23][^>]*>([\s\S]*?)<\/h[23]>/i)
+      const priceMatch = card.match(/<strong[^>]*class="[^"]*\bamount\b[^"]*"[^>]*>([\s\S]*?)<\/strong>/i) ||
+                         card.match(/<div[^>]*class="[^"]*\bsellingPrice\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i)
+      const imgMatch = card.match(/<img[^>]+src="([^"]+)"/)
+      if (!linkMatch || !titleMatch || !priceMatch) continue
+      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://www.noon.com')
+      if (!absUrl) continue
+      hits.push({
+        name: stripTags(titleMatch[1]),
+        url: absUrl,
+        price: stripTags(priceMatch[1]),
+        image: imgMatch ? imgMatch[1] : '',
+      })
+    }
+  }
+
+  console.log(`[${tag}] extracted ${hits.length} raw hits`)
+  if (hits.length === 0) return []
+
+  // Map → shape expected by normalizeProducts (which applies relevance + accessory + floor).
+  const mapped: Partial<RawProduct>[] = []
+  const seenUrls = new Set<string>()
+  for (const h of hits) {
+    if (mapped.length >= 20) break
+    const name = h.nameEn || h.name || h.productTitle || ''
+    if (!name) continue
+    const url = noonProductUrl(h)
+    if (!url || seenUrls.has(url)) continue
+    seenUrls.add(url)
+    const priceRaw = h.salePrice ?? h.finalPrice ?? h.price
+    if (priceRaw === undefined || priceRaw === null || priceRaw === '') continue
+    const image = h.imageUrl || h.image || noonImageFromKey(h.imageKey)
+    mapped.push({
+      name: String(name),
+      name_ar: h.nameAr ? String(h.nameAr) : String(name),
+      price: priceRaw as string | number,
+      url,
+      image,
+      specs: h.brand ? String(h.brand) : '',
+      store: 'Noon',
+    })
+  }
+  return normalizeProducts(mapped, 'Noon', query)
+}
+
 // ════════════════════════════════════════════════════════════════════
 // BIG 5 STORE CONFIG
-//   • Amazon Egypt, Jumia, 2B Egypt → native (12s race → Firecrawl fallback)
-//   • Noon, B.TECH                  → direct Firecrawl (heavy WAF/Cloudflare)
+//   • Amazon Egypt, Jumia, B.TECH, Noon → native scrapers
+//   • 2B Egypt                         → direct Firecrawl (Magento + anti-bot)
 // ════════════════════════════════════════════════════════════════════
 // MOBILE-FOCUSED URLs: where supported, scope the search to the smartphones category
 // so the engine sees mostly phones (less accessory pollution at source).
@@ -835,7 +1010,7 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // 2B Egypt: native scraper PERMANENTLY DISABLED — Magento markup changes + anti-bot
   // forced a full Firecrawl migration. All queries route directly to Firecrawl.
   '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
-  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'firecrawl', tier: 1 },
+  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'native',    tier: 1, nativeScraper: scrapeNoonNative },
   // B.TECH: native via Next.js Server Action (sub-2s structured JSON, no Firecrawl).
   // On 0 results (e.g. action ID rotated post-deploy), Safety Valve falls back to Firecrawl.
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
@@ -1129,12 +1304,18 @@ async function runRetrievalPipeline(
     }
   }
 
-  // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE) ──
+  // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE, except for Noon) ──
   // Per safety rule: if native/API failed OR returned empty, Firecrawl MUST be attempted.
-  // Only blockers allowed: missing API key, exhausted time budget, denied credit reservation.
+  // EXCEPTION: Noon is native-only — Firecrawl was removed (500 lifetime + 2 concurrency cap).
+  // For Noon, an empty Stage 1/2 means EMPTY_RESULT and we exit cleanly.
+  // Other allowed blockers: missing API key, exhausted time budget, denied credit reservation.
   const fallback_mandatory = bestProducts.length === 0
+  const NATIVE_ONLY_STORES = new Set(['Noon'])
   if (fallback_mandatory) {
-    if (!firecrawlKey) {
+    if (NATIVE_ONLY_STORES.has(store)) {
+      fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
+      console.log(`[${store}] Stage 3 SKIPPED — store is native-only (Firecrawl removed). reason=${fallback_reason}`)
+    } else if (!firecrawlKey) {
       fallback_reason = 'KEY_MISSING'
       console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
     } else if (remainingMs() <= 3000) {
