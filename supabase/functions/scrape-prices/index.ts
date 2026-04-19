@@ -446,8 +446,8 @@ async function scrapeBTech(query: string, stage: ScrapeStage = 1): Promise<RawPr
     } catch { /* skip non-JSON RSC frames */ }
   }
   const items = payload?.data?.items || []
-  if (items.length === 0) { console.warn('[B.TECH] Server Action: 0 items in payload'); return [] }
-  console.log(`[B.TECH] Server Action: ${items.length} raw items`)
+  if (items.length === 0) { console.warn(`[${tag}] Server Action: 0 items in payload`); return [] }
+  console.log(`[${tag}] Server Action: ${items.length} raw items`)
 
   // Map to the shape normalizeProducts() expects, then run the shared accept
   // gate (relevance + accessories + score + price floor; caps at 5 items).
