@@ -545,7 +545,7 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
     if (!response.ok) { console.error(`[Firecrawl] ${storeName} error:`, data); return [] }
     const products = data?.data?.extract?.products || data?.extract?.products || []
     console.log(`[Firecrawl] ${storeName}: ${products.length} raw products`)
-    return normalizeProducts(products, storeName)
+    return normalizeProducts(products, storeName, query)
   } catch (err) {
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
     return []
