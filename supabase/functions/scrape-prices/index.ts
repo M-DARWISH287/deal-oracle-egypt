@@ -551,11 +551,17 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
 
 // Amazon Egypt: target [data-component-type="s-search-result"] containers
 // + .a-price-whole for clean integer price (ignores decimals).
-async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
+async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<RawProduct[]> {
+  const tag = `Amazon native stage-${stage}`
   try {
-    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
-    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
-    if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
+    // Stage 2: drop the strict node filter (rh=...) + use page=2 + alt UA — different
+    // request shape can dodge UA-rate-limit / soft-block on the same query.
+    const baseUrl = stage === 2
+      ? `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&page=2&language=en_AE`
+      : `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
+    const headers = stage === 2 ? STEALTH_HEADERS_ALT : STEALTH_HEADERS
+    const res = await fetchWithTimeout(baseUrl, { headers }, 10000)
+    if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     let html = await res.text()
 
     // ── STRIP SPONSORED CONTENT before parsing ──
