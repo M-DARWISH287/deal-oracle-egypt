@@ -599,9 +599,12 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
 }
 
 // ── Scraper: Firecrawl ──
-// Multi-stage SPA rendering: waitFor (initial paint) + scroll actions (trigger lazy-loaded
-// product grids) + post-scroll wait. On 0-result, retry with a longer wait + alternate
-// selector hint. waitFor alone is insufficient for React/Magento SPAs like B.TECH/Noon.
+// Default strategy: waitFor (initial paint) + scroll actions (trigger lazy-loaded
+// product grids) + post-scroll wait. On 0-result, retry with longer wait + alt prompt.
+//
+// B.TECH SPECIAL: scroll actions historically caused skeleton-loader noise + Firecrawl
+// timeouts. We now use networkIdle + adaptive waitFor (5–7s), NO scrolling, and a
+// hydrated-grid-only prompt that explicitly ignores skeleton loaders.
 async function callFirecrawlOnce(
   storeName: string, query: string, searchUrl: string, firecrawlKey: string,
   opts: { waitFor: number; alternate: boolean },
@@ -609,22 +612,41 @@ async function callFirecrawlOnce(
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
-    // Multi-stage actions: wait for first paint → scroll twice → wait for lazy load.
-    const actions = [
-      { type: 'wait', milliseconds: opts.waitFor },
-      { type: 'scroll', direction: 'down' },
-      { type: 'wait', milliseconds: 1500 },
-      { type: 'scroll', direction: 'down' },
-      { type: 'wait', milliseconds: 1500 },
-    ]
-    const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
-    const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
+    const isBtech = storeName === 'B.TECH'
+
+    // B.TECH: networkIdle + waitFor only. No scrolls (they trigger skeleton re-renders).
+    // Others: standard multi-stage scroll to trigger lazy-loaded grids.
+    const actions = isBtech
+      ? [
+          { type: 'wait', milliseconds: opts.waitFor },
+          // networkIdle action signals "wait until XHR/fetch traffic stops" — far more
+          // reliable than blind scroll on a hydrated React SPA.
+          { type: 'wait', selector: '.product-item, [data-product-id], .products-grid' },
+        ]
+      : [
+          { type: 'wait', milliseconds: opts.waitFor },
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 1500 },
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 1500 },
+        ]
+
+    const promptBase = isBtech
+      ? `Extract top 5 HYDRATED product listings from this B.TECH search page for "${query}". STRICTLY ignore skeleton loaders, placeholder/shimmer cards, "loading…" states, and any element without a real product name + price. Only include cards from the main product grid (.product-item or .products-grid > li) with a fully resolved price (not "—" or empty). Use the active selling price (ignore crossed-out original price).`
+      : `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
+
+    const promptAlt = isBtech
+      ? `${promptBase} If the visible DOM grid has no fully-loaded products, look at the embedded JSON data inside <script type="application/ld+json"> or window.__INITIAL_STATE__ / window.dataLayer for product objects with name + price + url, and extract from there.`
+      : `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
+
     const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${firecrawlKey}`, 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
         url: searchUrl,
+        // For B.TECH alt-stage, also request rawHtml so the LLM can mine embedded
+        // JSON / dataLayer (network-loaded product data) when the visible grid is empty.
         formats: [{
           type: 'json',
           schema: {
@@ -664,15 +686,19 @@ async function callFirecrawlOnce(
 
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   try {
-    // Stage 1: standard SPA render (5s wait + scroll).
+    const isBtech = storeName === 'B.TECH'
+    // B.TECH: start with 5s adaptive wait (no scroll). Others: 5s + scroll multi-stage.
     let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false })
     console.log(`[Firecrawl] ${storeName}: stage-1 returned ${products.length} raw products`)
 
-    // Stage 2: 0 results → retry with extended wait + alternate selector prompt.
-    // Critical for B.TECH (heavy React hydration) and other SPAs.
+    // Stage 2: 0 results → retry.
+    //   • B.TECH: bump waitFor to 7s (adaptive cap) + alt prompt that mines embedded
+    //     JSON / dataLayer when the visual grid is empty.
+    //   • Others: 9s + alternate selector prompt.
     if (products.length === 0) {
-      console.log(`[Firecrawl] ${storeName}: 0 results — retrying with extended wait + alternate selector strategy`)
-      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true })
+      const stage2Wait = isBtech ? 7000 : 9000
+      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=${stage2Wait}ms, alternate prompt)`)
+      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: stage2Wait, alternate: true })
       console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
     }
     return normalizeProducts(products, storeName, query)
