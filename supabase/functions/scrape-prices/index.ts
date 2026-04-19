@@ -147,7 +147,7 @@ function matchesIntent(query: string, productName: string): boolean {
 // 'monitor', 'speaker', 'headphone' (phones mention these in marketing copy/specs).
 const ACCESSORY_KEYWORDS = [
   // Pure accessories (EN)
-  'case ', 'cover ', 'protector', 'screen protector', 'tempered glass',
+  'protector', 'screen protector', 'tempered glass',
   'cable', 'charger', 'adapter', 'holder', 'phone stand', 'phone mount',
   'earphone', 'earbuds', 'headset', 'strap', 'wristband', 'pouch', 'sleeve',
   'lens protector', 'camera protector', 'lens cover',
@@ -161,7 +161,11 @@ const ACCESSORY_KEYWORDS = [
   // Distinct non-mobile categories (AR)
   'لاب توب', 'لابتوب', 'تابلت', 'تلفزيون', 'تليفزيون', 'ساعة ذكية', 'ساعة سامسونج', 'ساعة ابل',
 ]
+// Word-boundary patterns: words like "case" / "cover" / "wallet" can appear separated
+// by punctuation ("Wallet Case,Black"), so substring matching with trailing-space fails.
+const ACCESSORY_REGEX = /\b(case|cover|wallet case|flip cover|back cover|skin)\b/i
 function isAccessory(name: string): boolean {
+  if (ACCESSORY_REGEX.test(name)) return true
   const lower = ` ${name.toLowerCase()} `
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
