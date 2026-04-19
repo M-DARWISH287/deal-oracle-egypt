@@ -246,7 +246,7 @@ export function runBenchmark(input: BenchmarkInput): BenchmarkReport {
   )
 
   let status: BenchmarkReport['status']
-  if (input.stage_used === 'FAIL' || input.products_count === 0) status = 'FAIL'
+  if (input.stage_used === 'FAIL' || input.products_count === 0 || overall < 50) status = 'FAIL'
   else if (overall >= 80) status = 'PASS'
   else status = 'DEGRADED'
 
