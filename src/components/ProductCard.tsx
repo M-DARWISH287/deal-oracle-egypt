@@ -175,7 +175,8 @@ export function ProductCard({ product, index }: ProductCardProps) {
                   </a>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
