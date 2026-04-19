@@ -204,7 +204,13 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
 
 function normalizeProducts(items: Partial<RawProduct>[], storeName: string): RawProduct[] {
   return items
-    .filter(p => p.name && p.url && !isAccessory(String(p.name)))
+    .filter(p => {
+      if (!p.name || !p.url) return false
+      const blob = `${p.name} ${p.specs || ''}`
+      if (isAccessory(blob)) return false
+      if (isOutOfStock(blob)) return false
+      return true
+    })
     .slice(0, 5)
     .map(p => {
       const parsed = parsePrice(p.price as any)
