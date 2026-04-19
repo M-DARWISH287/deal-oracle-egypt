@@ -861,10 +861,15 @@ async function fetchNoonOnce(url: string, attempt: number): Promise<Response | n
   const controller = new AbortController()
   const t = setTimeout(() => controller.abort(), NOON_TIMEOUT_MS)
   try {
+    // Minimal header set — Noon's edge (Cloudflare/Akamai) rejects Deno's HTTP/2
+    // requests when too many "browser-y" headers are present (Sec-Fetch-* + brotli).
+    // Send only UA + Accept + Accept-Language to keep the request small + clean.
+    const ua = attempt % 2 === 0 ? USER_AGENT : USER_AGENT_ALT
     return await fetch(url, {
       signal: controller.signal,
       headers: {
-        ...(attempt % 2 === 0 ? STEALTH_HEADERS : STEALTH_HEADERS_ALT),
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
       },
     })
