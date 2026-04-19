@@ -279,6 +279,10 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
           group.offers.push({ store: p.store, price: p.price, url: p.url, currency: 'EGP' });
         }
         if (p.image && !group.image) group.image = p.image;
+        // Keep the MAX confidence score across all offers in the group.
+        if ((p.confidenceScore ?? 0) > (group.confidenceScore ?? 0)) {
+          group.confidenceScore = p.confidenceScore;
+        }
         matched = true; break;
       }
     }
@@ -290,13 +294,17 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
         image: p.image || '', category: 'electronics',
         offers: [{ store: p.store, price: p.price, url: p.url, currency: 'EGP' }],
         isRefurbished: p.isRefurbished || false,
+        confidenceScore: p.confidenceScore ?? 0,
       });
     }
   }
   return Array.from(grouped.values())
     .map(p => { p.offers.sort((a, b) => a.price - b.price); return p; })
     .sort((a, b) => {
-      if (b.offers.length !== a.offers.length) return b.offers.length - a.offers.length;
+      // 1) Confidence score DESC, 2) price ASC.
+      const sa = a.confidenceScore ?? 0;
+      const sb = b.confidenceScore ?? 0;
+      if (sb !== sa) return sb - sa;
       return a.offers[0].price - b.offers[0].price;
     }).slice(0, 30);
 }
