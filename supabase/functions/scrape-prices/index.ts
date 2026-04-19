@@ -103,15 +103,28 @@ function matchesIntent(query: string, productName: string): boolean {
   return true
 }
 
+// MOBILE-STRICT: drop accessories AND non-mobile categories.
+// CRITICAL: keywords must NOT overlap with phone-spec language. e.g. 'شاشة' (screen)
+// appears in nearly every Arabic phone listing → CANNOT be a kill keyword. Same for
+// 'monitor', 'speaker', 'headphone' (phones mention these in marketing copy/specs).
 const ACCESSORY_KEYWORDS = [
-  'case', 'cover', 'protector', 'screen protector', 'tempered glass',
-  'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
-  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
-  'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
-  'film', 'glass', 'lens protector', 'camera protector',
+  // Pure accessories (EN)
+  'case ', 'cover ', 'protector', 'screen protector', 'tempered glass',
+  'cable', 'charger', 'adapter', 'holder', 'phone stand', 'phone mount',
+  'earphone', 'earbuds', 'headset', 'strap', 'wristband', 'pouch', 'sleeve',
+  'lens protector', 'camera protector', 'lens cover',
+  // Pure accessories (AR)
+  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين بروتكتور', 'حماية شاشة',
+  // Distinct non-mobile categories (EN) — phrases that only appear in non-phone titles
+  'smartwatch', 'smart watch', 'galaxy watch', 'apple watch',
+  'laptop', 'notebook pc', 'macbook',
+  'tablet', 'ipad ', 'galaxy tab',
+  'television', 'smart tv', 'led tv', 'lcd tv', 'qled', 'oled tv',
+  // Distinct non-mobile categories (AR)
+  'لاب توب', 'لابتوب', 'تابلت', 'تلفزيون', 'تليفزيون', 'ساعة ذكية', 'ساعة سامسونج', 'ساعة ابل',
 ]
 function isAccessory(name: string): boolean {
-  const lower = name.toLowerCase()
+  const lower = ` ${name.toLowerCase()} `
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
 
@@ -248,16 +261,19 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string): Raw
 // ════════════════════════════════════════════════════════════════════
 
 // Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
+// MOBILE FOCUS: Jumia's bare search floods accessories. Append "smartphone" to disambiguate
+// AND scan up to 50 cards (defaults of 15 returned 0 phones in practice).
 async function scrapeJumia(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(query)}`
+    const mobileQuery = `${query} smartphone`
+    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
     const articles = html.match(articleRe) || []
-    for (const a of articles.slice(0, 15)) {
+    for (const a of articles.slice(0, 50)) {
       const hrefMatch =
         a.match(/<a[^>]+class="[^"]*\bcore\b[^"]*"[^>]+href="([^"]+)"/) ||
         a.match(/<a[^>]+href="(\/[^"]+\.html[^"]*)"/)
@@ -295,7 +311,7 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
 // + .a-price-whole for clean integer price (ignores decimals).
 async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&language=en_AE`
+    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
     const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
     if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
     const html = await res.text()
@@ -362,14 +378,16 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
 // only the active discount survives, and Math.min picks the lowest.
 async function scrape2B(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(query)}`
+    // Append "smartphone" to disambiguate (avoid accessory-dominated organic ranking)
+    const mobileQuery = `${query} smartphone`
+    const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(mobileQuery)}`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
     const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
     const blocks = html.match(itemRe) || []
-    for (const b of blocks.slice(0, 15)) {
+    for (const b of blocks.slice(0, 50)) {
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
       const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
       if (!linkMatch) continue
@@ -397,12 +415,20 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
 //   • Amazon Egypt, Jumia, 2B Egypt → native (12s race → Firecrawl fallback)
 //   • Noon, B.TECH                  → direct Firecrawl (heavy WAF/Cloudflare)
 // ════════════════════════════════════════════════════════════════════
+// MOBILE-FOCUSED URLs: where supported, scope the search to the smartphones category
+// so the engine sees mostly phones (less accessory pollution at source).
+// MOBILE-FOCUSED: we filter non-mobile items aggressively in `isAccessory()` (smartwatch,
+// laptop, tablet, TV, etc.). We keep the search URLs PLAIN — narrowing them with category
+// params (e.g. Jumia &category=mobile-phones-2399, 2B &cat=11, Noon f[category]=mobiles)
+// either returned empty result pages or HTTP 500 across stores. Plain search + post-filter
+// is more resilient.
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`,                       method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
-  'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,             method: 'native',    tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,    method: 'native',    tier: 1, nativeScraper: scrape2B },
-  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,         method: 'firecrawl', tier: 1 },
-  'B.TECH':       { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`,       method: 'firecrawl', tier: 1 },
+  // Amazon EG: scope to Mobile Phones node — node 21832883031 confirmed working live.
+  'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}&i=electronics&rh=n%3A21832883031`,    method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
+  'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,                            method: 'native',    tier: 1, nativeScraper: scrapeJumia },
+  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrape2B },
+  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'firecrawl', tier: 1 },
+  'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
 }
 
 // ── Scraper: Firecrawl ──
