@@ -1107,12 +1107,19 @@ Deno.serve(async (req) => {
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
       console.error(`[${store}] Pipeline error:`, scrapeErr)
+      const errLatency = Date.now() - requestStart
+      const errBenchmark = runBenchmark({
+        query: trimmedQuery, intent, expanded_queries: expanded, used_query: null,
+        stage_used: 'FAIL', attempts: 0, products_count: 0, latency_ms: errLatency,
+        invalid_items_count: 0, selected_stores: [store], routing_scores: {},
+      })
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
-        stage_used: 'FAIL', attempts: 0, latency_ms: Date.now() - requestStart,
+        stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
         semantic_intent: intent, expanded_queries_count: expanded.length,
         error: String(scrapeErr),
+        benchmark: errBenchmark,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
