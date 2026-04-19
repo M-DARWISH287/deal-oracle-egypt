@@ -1004,7 +1004,7 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // 2B Egypt: native scraper PERMANENTLY DISABLED — Magento markup changes + anti-bot
   // forced a full Firecrawl migration. All queries route directly to Firecrawl.
   '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
-  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'firecrawl', tier: 1 },
+  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'native',    tier: 1, nativeScraper: scrapeNoonNative },
   // B.TECH: native via Next.js Server Action (sub-2s structured JSON, no Firecrawl).
   // On 0 results (e.g. action ID rotated post-deploy), Safety Valve falls back to Firecrawl.
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
