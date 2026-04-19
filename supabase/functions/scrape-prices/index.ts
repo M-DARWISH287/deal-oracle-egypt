@@ -1,7 +1,34 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // PHASE 4 — semantic intelligence layer (additive; pipeline untouched)
 import { canonicalizeQuery, expandQueries, semanticRerank, routeStores, type SemanticIntent } from './semantic.ts'
-import { runBenchmark } from './benchmark.ts'
+import { runBenchmark, type BenchmarkReport } from './benchmark.ts'
+
+// Fire-and-forget insert into regression_logs (service-role bypass; never blocks the response).
+function persistRegressionLog(
+  supabaseUrl: string, supabaseKey: string,
+  store: string, latencyMs: number, b: BenchmarkReport,
+) {
+  try {
+    const c = createClient(supabaseUrl, supabaseKey)
+    c.from('regression_logs').insert({
+      query: b.query,
+      store,
+      stage_used: null,
+      latency_ms: latencyMs,
+      intent_accuracy: b.intent_accuracy,
+      expansion_quality: b.expansion_quality,
+      retrieval_health: b.retrieval_health,
+      performance: b.performance,
+      overall_score: b.overall_score,
+      status: b.status,
+      bottleneck: b.detected_bottleneck,
+      key_issues: b.key_issues,
+      key_strengths: b.key_strengths,
+    }).then(({ error }: { error: { message: string } | null }) => {
+      if (error) console.warn(`[${store}] regression_logs insert failed:`, error.message)
+    })
+  } catch (e) { console.warn(`[${store}] regression_logs insert exception:`, e) }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
