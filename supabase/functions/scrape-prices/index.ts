@@ -32,6 +32,23 @@ function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): 
   ])
 }
 
+// 3-STAGE RETRIEVAL — Stages 1 + 2 native (no blind retries):
+// Stage 1: primary native scraper (default params, 3s aggressive timeout).
+// Stage 2: same scraper with stage=2 (rotated UA + modified params: page=2 / size=30),
+//          ONLY if Stage 1 returned 0 items. Single retry, never identical to Stage 1.
+async function runNativeStages(
+  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
+  query: string,
+  store: string,
+): Promise<RawProduct[]> {
+  const stage1 = await raceWithTimeout(scraper(query, 1), STAGE1_NATIVE_TIMEOUT_MS, `${store} S1`)
+  if (stage1.length > 0) return stage1
+  console.log(`[${store}] Stage 1 returned 0 — running Stage 2 (UA rotation + modified params)`)
+  const stage2 = await raceWithTimeout(scraper(query, 2), STAGE2_NATIVE_TIMEOUT_MS, `${store} S2`)
+  if (stage2.length > 0) console.log(`[${store}] Stage 2 recovered ${stage2.length} items`)
+  return stage2
+}
+
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 // Stage-2 alternate UA (Firefox/Linux) — different fingerprint from STEALTH_HEADERS Safari/macOS UA.
