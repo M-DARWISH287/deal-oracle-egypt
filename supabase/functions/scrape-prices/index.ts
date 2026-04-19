@@ -716,25 +716,26 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
 }
 
-// ── Scraper: Firecrawl ──
-// Default strategy: waitFor (initial paint) + scroll actions (trigger lazy-loaded
-// product grids) + post-scroll wait. On 0-result, retry with longer wait + alt prompt.
-// Used by Noon, 2B Egypt, and as Safety Valve fallback for native stores
-// (Amazon EG, Jumia, B.TECH) when their native scrapers return [].
+// ── Scraper: Firecrawl (Stage 3 multi-strategy fallback) ──
+// Attempt 1 (stage 1): waitFor=5000, NO scroll — fastest path, works for static SSR pages.
+// Attempt 2 (stage 2): waitFor=9000 + scroll actions + alternative selector prompt — for
+// lazy-loaded SPA grids that need user interaction to hydrate.
 async function callFirecrawlOnce(
   storeName: string, query: string, searchUrl: string, firecrawlKey: string,
-  opts: { waitFor: number; alternate: boolean },
+  opts: { waitFor: number; alternate: boolean; scroll: boolean },
 ): Promise<any[]> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
-    const actions = [
-      { type: 'wait', milliseconds: opts.waitFor },
-      { type: 'scroll', direction: 'down' },
-      { type: 'wait', milliseconds: 1500 },
-      { type: 'scroll', direction: 'down' },
-      { type: 'wait', milliseconds: 1500 },
-    ]
+    const actions = opts.scroll
+      ? [
+          { type: 'wait', milliseconds: opts.waitFor },
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 1500 },
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 1500 },
+        ]
+      : [{ type: 'wait', milliseconds: opts.waitFor }]
 
     const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
     const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
