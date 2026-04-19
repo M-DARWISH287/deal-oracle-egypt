@@ -103,20 +103,25 @@ function matchesIntent(query: string, productName: string): boolean {
   return true
 }
 
-// MOBILE-STRICT: drop accessories AND non-mobile categories (smartwatches, laptops, tablets, TVs).
+// MOBILE-STRICT: drop accessories AND non-mobile categories.
+// CRITICAL: keywords must NOT overlap with phone-spec language. e.g. 'شاشة' (screen)
+// appears in nearly every Arabic phone listing → CANNOT be a kill keyword. Same for
+// 'monitor', 'speaker', 'headphone' (phones mention these in marketing copy/specs).
 const ACCESSORY_KEYWORDS = [
-  // Accessories (EN)
-  'case', 'cover', 'protector', 'screen protector', 'tempered glass',
-  'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
-  'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
-  'film', 'glass', 'lens protector', 'camera protector',
-  // Accessories (AR)
-  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
-  // Non-mobile categories (EN)
-  'smartwatch', 'smart watch', 'laptop', 'notebook', 'tablet', 'ipad',
-  'tv ', ' tv', 'television', 'monitor', 'headphone', 'speaker',
-  // Non-mobile categories (AR)
-  'ساعة', 'لاب توب', 'لابتوب', 'تابلت', 'تلفزيون', 'تليفزيون', 'شاشة',
+  // Pure accessories (EN)
+  'case ', 'cover ', 'protector', 'screen protector', 'tempered glass',
+  'cable', 'charger', 'adapter', 'holder', 'phone stand', 'phone mount',
+  'earphone', 'earbuds', 'headset', 'strap', 'wristband', 'pouch', 'sleeve',
+  'lens protector', 'camera protector', 'lens cover',
+  // Pure accessories (AR)
+  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين بروتكتور', 'حماية شاشة',
+  // Distinct non-mobile categories (EN) — phrases that only appear in non-phone titles
+  'smartwatch', 'smart watch', 'galaxy watch', 'apple watch',
+  'laptop', 'notebook pc', 'macbook',
+  'tablet', 'ipad ', 'galaxy tab',
+  'television', 'smart tv', 'led tv', 'lcd tv', 'qled', 'oled tv',
+  // Distinct non-mobile categories (AR)
+  'لاب توب', 'لابتوب', 'تابلت', 'تلفزيون', 'تليفزيون', 'ساعة ذكية', 'ساعة سامسونج', 'ساعة ابل',
 ]
 function isAccessory(name: string): boolean {
   const lower = ` ${name.toLowerCase()} `
