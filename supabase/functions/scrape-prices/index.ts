@@ -106,15 +106,45 @@ export function normalizeQuery(raw: string): { execution: string; original: stri
   return { execution, original }
 }
 
-// Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
-function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
-  return Promise.race([
-    p,
-    new Promise<T[]>((resolve) => setTimeout(() => {
-      console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage`)
-      resolve([])
-    }, timeoutMs)),
-  ])
+// ── FALLBACK REASON ENUM (Part 1 — standardized) ──
+// Every skipped/empty stage outcome MUST resolve to one of these reasons.
+type FallbackReason =
+  | 'EMPTY_RESULT'
+  | 'NATIVE_ERROR'
+  | 'TIMEOUT'
+  | 'INVALID_RESPONSE'
+  | 'CREDIT_LIMIT'
+  | 'KEY_MISSING'
+  | 'BUDGET_EXHAUSTED'
+  | 'NONE'
+
+// Internal stage outcome carrying the reason so the orchestrator can decide
+// whether to escalate to the next stage AND log structured failure causes.
+interface StageOutcome<T> { products: T[]; failure: FallbackReason | null }
+
+// Promise.race helper: catches errors AND timeouts and reports the cause.
+// Returns { products, failure } where failure ∈ FallbackReason | null.
+async function raceWithTimeoutTraced<T>(
+  p: Promise<T[]>, timeoutMs: number, label: string,
+): Promise<StageOutcome<T>> {
+  let timedOut = false
+  const timeoutPromise = new Promise<T[]>((resolve) => setTimeout(() => {
+    timedOut = true
+    console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage (TIMEOUT)`)
+    resolve([])
+  }, timeoutMs))
+  try {
+    const products = await Promise.race([p, timeoutPromise])
+    if (timedOut) return { products: [], failure: 'TIMEOUT' }
+    if (!Array.isArray(products)) {
+      console.warn(`[${label}] returned non-array — INVALID_RESPONSE`)
+      return { products: [], failure: 'INVALID_RESPONSE' }
+    }
+    return { products, failure: products.length === 0 ? 'EMPTY_RESULT' : null }
+  } catch (err) {
+    console.error(`[${label}] threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
+    return { products: [], failure: 'NATIVE_ERROR' }
+  }
 }
 
 // Sleep helper for Stage 2 jitter (300-800ms randomized).
