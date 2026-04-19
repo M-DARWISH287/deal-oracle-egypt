@@ -258,7 +258,7 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string): Raw
 // Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
 async function scrapeJumia(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(query)}`
+    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(query)}&category=mobile-phones-2399`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
     const html = await res.text()
@@ -370,7 +370,7 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
 // only the active discount survives, and Math.min picks the lowest.
 async function scrape2B(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(query)}`
+    const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(query)}&cat=11`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
     const html = await res.text()
