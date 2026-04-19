@@ -1145,7 +1145,23 @@ Deno.serve(async (req) => {
 
     const totalLatencyMs = Date.now() - requestStart
 
-    // ── Part 7: Structured metric log + Phase 4 semantic telemetry (additive fields) ──
+    // ── Deterministic post-mortem benchmark (zero LLM, <1ms) ──
+    const routing = routeStores(intent, [store], 1)
+    const benchmark = runBenchmark({
+      query: trimmedQuery,
+      intent,
+      expanded_queries: expanded,
+      used_query: usedQuery,
+      stage_used: pipeline.stage_used,
+      attempts: pipeline.attempts,
+      products_count: products.length,
+      latency_ms: totalLatencyMs,
+      invalid_items_count: pipeline.invalidCount,
+      selected_stores: routing.selected,
+      routing_scores: routing.scores,
+    })
+
+    // ── Part 7: Structured metric log + Phase 4 semantic telemetry + benchmark ──
     console.log(JSON.stringify({
       kind: 'scrape_metric',
       store,
@@ -1160,6 +1176,7 @@ Deno.serve(async (req) => {
       usedFallback,
       semantic_intent: intent,
       expanded_queries_count: expanded.length,
+      benchmark,
     }))
 
     // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
@@ -1191,6 +1208,8 @@ Deno.serve(async (req) => {
       semantic_intent: intent,
       expanded_queries_count: expanded.length,
       used_query: usedQuery,
+      // Post-mortem self-evaluation
+      benchmark,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
