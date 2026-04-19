@@ -530,7 +530,7 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
       accepted.push({ name, url: absUrl, price: priceStr, image: imgMatch ? imgMatch[1] : '' })
       scores.set(absUrl, score)
     }
-    console.log(`[Jumia native] streamed ${scanned} cards, accepted ${accepted.length}`)
+    console.log(`[${tag}] streamed ${scanned} cards, accepted ${accepted.length}`)
     // Pre-validated → bypass relevance double-check, but still apply price floor.
     return accepted
       .map(p => {
