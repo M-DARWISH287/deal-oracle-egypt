@@ -106,15 +106,45 @@ export function normalizeQuery(raw: string): { execution: string; original: stri
   return { execution, original }
 }
 
-// Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
-function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
-  return Promise.race([
-    p,
-    new Promise<T[]>((resolve) => setTimeout(() => {
-      console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage`)
-      resolve([])
-    }, timeoutMs)),
-  ])
+// ── FALLBACK REASON ENUM (Part 1 — standardized) ──
+// Every skipped/empty stage outcome MUST resolve to one of these reasons.
+type FallbackReason =
+  | 'EMPTY_RESULT'
+  | 'NATIVE_ERROR'
+  | 'TIMEOUT'
+  | 'INVALID_RESPONSE'
+  | 'CREDIT_LIMIT'
+  | 'KEY_MISSING'
+  | 'BUDGET_EXHAUSTED'
+  | 'NONE'
+
+// Internal stage outcome carrying the reason so the orchestrator can decide
+// whether to escalate to the next stage AND log structured failure causes.
+interface StageOutcome<T> { products: T[]; failure: FallbackReason | null }
+
+// Promise.race helper: catches errors AND timeouts and reports the cause.
+// Returns { products, failure } where failure ∈ FallbackReason | null.
+async function raceWithTimeoutTraced<T>(
+  p: Promise<T[]>, timeoutMs: number, label: string,
+): Promise<StageOutcome<T>> {
+  let timedOut = false
+  const timeoutPromise = new Promise<T[]>((resolve) => setTimeout(() => {
+    timedOut = true
+    console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage (TIMEOUT)`)
+    resolve([])
+  }, timeoutMs))
+  try {
+    const products = await Promise.race([p, timeoutPromise])
+    if (timedOut) return { products: [], failure: 'TIMEOUT' }
+    if (!Array.isArray(products)) {
+      console.warn(`[${label}] returned non-array — INVALID_RESPONSE`)
+      return { products: [], failure: 'INVALID_RESPONSE' }
+    }
+    return { products, failure: products.length === 0 ? 'EMPTY_RESULT' : null }
+  } catch (err) {
+    console.error(`[${label}] threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
+    return { products: [], failure: 'NATIVE_ERROR' }
+  }
 }
 
 // Sleep helper for Stage 2 jitter (300-800ms randomized).
@@ -962,6 +992,7 @@ interface StageResult {
   invalidCount: number
   latencyMs: number
   ok: boolean              // true if at least 1 valid product
+  failure: FallbackReason | null  // why the stage produced nothing (null if ok)
 }
 
 async function runStage1_API(
@@ -969,11 +1000,13 @@ async function runStage1_API(
   query: string, store: string,
 ): Promise<StageResult> {
   const t0 = Date.now()
-  const raw = await raceWithTimeout(scraper(query, 1), STAGE1_TIMEOUT_MS, `${store} S1-API`)
-  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  const outcome = await raceWithTimeoutTraced(scraper(query, 1), STAGE1_TIMEOUT_MS, `${store} S1-API`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(outcome.products, query)
+  const ok = valid.length > 0
   return {
-    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok: valid.length > 0,
+    products: valid, rawCount: outcome.products.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok,
+    failure: ok ? null : (outcome.failure ?? 'EMPTY_RESULT'),
   }
 }
 
@@ -986,11 +1019,13 @@ async function runStage2_Retry(
   await jitterSleep()
   // Use the lower of STAGE2_TIMEOUT_MS or remainingMs to respect Part 10 global budget.
   const timeoutMs = Math.max(1500, Math.min(STAGE2_TIMEOUT_MS, remainingMs - 500))
-  const raw = await raceWithTimeout(scraper(query, 2), timeoutMs, `${store} S2-RETRY`)
-  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  const outcome = await raceWithTimeoutTraced(scraper(query, 2), timeoutMs, `${store} S2-RETRY`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(outcome.products, query)
+  const ok = valid.length > 0
   return {
-    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok: valid.length > 0,
+    products: valid, rawCount: outcome.products.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok,
+    failure: ok ? null : (outcome.failure ?? 'EMPTY_RESULT'),
   }
 }
 
@@ -998,11 +1033,21 @@ async function runStage3_Firecrawl(
   query: string, store: string, searchUrl: string, firecrawlKey: string,
 ): Promise<StageResult> {
   const t0 = Date.now()
-  const raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
+  let raw: RawProduct[] = []
+  let failureBase: FallbackReason | null = null
+  try {
+    raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
+    if (!Array.isArray(raw)) { failureBase = 'INVALID_RESPONSE'; raw = [] }
+  } catch (err) {
+    console.error(`[${store}] Stage 3 (FIRECRAWL) threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
+    failureBase = 'NATIVE_ERROR'
+  }
   const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  const ok = valid.length > 0
   return {
     products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok: valid.length > 0,
+    latencyMs: Date.now() - t0, ok,
+    failure: ok ? null : (failureBase ?? 'EMPTY_RESULT'),
   }
 }
 
@@ -1011,8 +1056,11 @@ async function runStage3_Firecrawl(
 interface PipelineResult {
   products: RawProduct[]
   stage_used: StageUsed
+  stages_attempted: Array<'API' | 'RETRY' | 'FIRECRAWL'>  // ordered list of stages we ran
   attempts: number
   usedFallback: boolean
+  fallback_mandatory: boolean       // true if Stage 1/2 failed → fallback was REQUIRED
+  fallback_reason: FallbackReason   // standardized enum (NONE if no fallback was needed)
   avgRelevance: number
   invalidCount: number
   totalLatencyMs: number
@@ -1025,11 +1073,15 @@ async function runRetrievalPipeline(
 ): Promise<PipelineResult> {
   const t0 = Date.now()
   let stage_used: StageUsed = 'API'
+  const stages_attempted: Array<'API' | 'RETRY' | 'FIRECRAWL'> = []
   let attempts = 0
   let bestProducts: RawProduct[] = []
   let bestAvg = 0
   let bestInvalid = 0
   let usedFallback = false
+  let fallback_reason: FallbackReason = 'NONE'
+  // Tracks the cause of the most recent native failure — used as the fallback trigger reason.
+  let nativeFailureCause: FallbackReason | null = null
 
   const elapsed = () => Date.now() - t0
   const remainingMs = () => MAX_TOTAL_MS - elapsed()
@@ -1040,68 +1092,82 @@ async function runRetrievalPipeline(
   // ── STAGE 1: API ──
   if (hasNative) {
     attempts++
+    stages_attempted.push('API')
     const s1 = await runStage1_API(config.nativeScraper!, query, store)
-    console.log(`[${store}] Stage 1 (API): raw=${s1.rawCount} valid=${s1.products.length} avgRel=${s1.avgRelevance} ${s1.latencyMs}ms`)
+    console.log(`[${store}] Stage 1 (API): raw=${s1.rawCount} valid=${s1.products.length} avgRel=${s1.avgRelevance} ${s1.latencyMs}ms failure=${s1.failure ?? 'none'}`)
     if (s1.ok) {
       stage_used = 'API'
       bestProducts = s1.products; bestAvg = s1.avgRelevance; bestInvalid = s1.invalidCount
       // Part 9: early exit (Stage 1 was good enough — skip 2 & 3).
       if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
-        return { products: bestProducts, stage_used, attempts, usedFallback,
+        return { products: bestProducts, stage_used, stages_attempted, attempts, usedFallback,
+          fallback_mandatory: false, fallback_reason: 'NONE',
           avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
       }
+    } else {
+      nativeFailureCause = s1.failure  // EMPTY_RESULT | TIMEOUT | NATIVE_ERROR | INVALID_RESPONSE
     }
   }
 
   // ── STAGE 2: RETRY (only if Stage 1 failed AND time remains) ──
   if (hasNative && bestProducts.length === 0 && remainingMs() > 2000) {
     attempts++
+    stages_attempted.push('RETRY')
     const s2 = await runStage2_Retry(config.nativeScraper!, query, store, remainingMs())
-    console.log(`[${store}] Stage 2 (RETRY): raw=${s2.rawCount} valid=${s2.products.length} avgRel=${s2.avgRelevance} ${s2.latencyMs}ms`)
+    console.log(`[${store}] Stage 2 (RETRY): raw=${s2.rawCount} valid=${s2.products.length} avgRel=${s2.avgRelevance} ${s2.latencyMs}ms failure=${s2.failure ?? 'none'}`)
     if (s2.ok) {
       stage_used = 'RETRY'
       bestProducts = s2.products; bestAvg = s2.avgRelevance; bestInvalid = s2.invalidCount
       if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
-        return { products: bestProducts, stage_used, attempts, usedFallback,
+        return { products: bestProducts, stage_used, stages_attempted, attempts, usedFallback,
+          fallback_mandatory: true, fallback_reason: 'NONE',
           avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
       }
+    } else {
+      // Latest native cause overrides — Stage 2 outcome is most recent signal.
+      nativeFailureCause = s2.failure
     }
   }
 
   // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE) ──
   // Per safety rule: if native/API failed OR returned empty, Firecrawl MUST be attempted.
   // Only blockers allowed: missing API key, exhausted time budget, denied credit reservation.
-  let fallback_reason: string | null = null
-  if (bestProducts.length === 0) {
+  const fallback_mandatory = bestProducts.length === 0
+  if (fallback_mandatory) {
     if (!firecrawlKey) {
-      fallback_reason = 'firecrawl_key_missing'
-      console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured`)
+      fallback_reason = 'KEY_MISSING'
+      console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
     } else if (remainingMs() <= 3000) {
-      fallback_reason = 'time_budget_exhausted'
-      console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining`)
+      fallback_reason = 'BUDGET_EXHAUSTED'
+      console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining (fallback_reason=BUDGET_EXHAUSTED)`)
     } else {
       const creditOk = await options.reserveFirecrawlCredit()
       if (!creditOk) {
-        fallback_reason = 'credit_reserve_failed'
-        console.warn(`[${store}] Stage 3 SKIPPED — credit reservation failed`)
+        fallback_reason = 'CREDIT_LIMIT'
+        console.warn(`[${store}] Stage 3 SKIPPED — credit reservation failed (fallback_reason=CREDIT_LIMIT)`)
       } else {
         attempts++
-        console.log(`[${store}] FALLBACK_TRIGGERED_FIRECRAWL reason=${hasNative ? 'native_empty_or_error' : 'firecrawl_only_store'}`)
+        stages_attempted.push('FIRECRAWL')
+        const triggerReason = hasNative ? (nativeFailureCause ?? 'EMPTY_RESULT') : 'EMPTY_RESULT'
+        console.log(`[${store}] FALLBACK_TRIGGERED_FIRECRAWL trigger=${triggerReason} mandatory=true`)
         const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
-        console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms`)
+        console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms failure=${s3.failure ?? 'none'}`)
         if (s3.ok) {
           stage_used = 'FIRECRAWL'; usedFallback = true
           bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
+          fallback_reason = 'NONE'
         } else {
-          fallback_reason = 'firecrawl_returned_empty'
+          // Firecrawl ran but produced nothing — surface its specific failure cause.
+          fallback_reason = s3.failure ?? 'EMPTY_RESULT'
         }
       }
     }
   }
 
   if (bestProducts.length === 0) stage_used = 'FAIL'
-  console.log(`[${store}] PIPELINE_DONE stage_used=${stage_used} fallback_triggered=${usedFallback} fallback_reason=${fallback_reason ?? 'none'} attempts=${attempts} latency=${elapsed()}ms`)
-  return { products: bestProducts, stage_used, attempts, usedFallback,
+  console.log(`[${store}] PIPELINE_DONE stage_used=${stage_used} stages_attempted=[${stages_attempted.join(',')}] fallback_triggered=${usedFallback} fallback_mandatory=${fallback_mandatory} fallback_reason=${fallback_reason} attempts=${attempts} latency=${elapsed()}ms`)
+  return { products: bestProducts, stage_used, stages_attempted, attempts, usedFallback,
+    fallback_mandatory, fallback_reason,
     avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
 }
 
@@ -1122,20 +1188,66 @@ async function settleCredits(supabaseUrl: string, serviceKey: string, txId: stri
   } catch (err) { console.error('[Credits] Settle error:', err) }
 }
 
+// ── PIPELINE_TRACE EMITTER (Part 2 — failure visibility, no silent fails) ──
+// Emits exactly one structured trace per request lifecycle. Called on every
+// exit path: success, scrape error, outer catch, validation failure.
+interface PipelineTrace {
+  store: string
+  original_query: string
+  normalized_query: string
+  stages_attempted: Array<'API' | 'RETRY' | 'FIRECRAWL'>
+  stage_used: StageUsed | 'NONE'
+  fallback_triggered: boolean
+  fallback_mandatory: boolean
+  fallback_reason: FallbackReason
+  latency_ms: number
+  items_found: number
+  success: boolean
+  error?: string
+}
+function emitPipelineTrace(t: PipelineTrace): void {
+  console.log(JSON.stringify({ kind: 'PIPELINE_TRACE', ...t }))
+}
+
 // ── Main Handler ──
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
 
+  // Captured early so the outer catch can still emit a trace.
+  const handlerStart = Date.now()
+  let traceStore = 'unknown'
+  let traceOriginal = ''
+  let traceNormalized = ''
+
   try {
-    const body = await req.json()
+    const body = await req.json().catch(() => ({}))
     const { query, store, force_refresh } = body
+    traceStore = typeof store === 'string' ? store : 'unknown'
+    traceOriginal = typeof query === 'string' ? query : ''
     // SECURITY: NEVER trust user_id from request body. Always verify via JWT.
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
+      emitPipelineTrace({
+        store: traceStore, original_query: traceOriginal, normalized_query: '',
+        stages_attempted: [], stage_used: 'NONE',
+        fallback_triggered: false, fallback_mandatory: false, fallback_reason: 'NONE',
+        latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+        error: 'QUERY_REQUIRED',
+      })
       return new Response(JSON.stringify({ success: false, error: 'Query is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
     if (!store || !STORE_CONFIGS[store]) {
-      return new Response(JSON.stringify({ success: false, error: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}` }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      emitPipelineTrace({
+        store: traceStore, original_query: traceOriginal, normalized_query: '',
+        stages_attempted: [], stage_used: 'NONE',
+        fallback_triggered: false, fallback_mandatory: false, fallback_reason: 'NONE',
+        latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+        error: 'STORE_NOT_REGISTERED',
+      })
+      return new Response(JSON.stringify({
+        success: false, error: 'STORE_NOT_REGISTERED',
+        message: `Invalid store. Valid: ${Object.keys(STORE_CONFIGS).join(', ')}`,
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
@@ -1165,6 +1277,7 @@ Deno.serve(async (req) => {
     // English brand keywords) get hits. Original query preserved for logs/cache key.
     const { execution: normalizedQuery, original: originalQuery } = normalizeQuery(query)
     const trimmedQuery = normalizedQuery.toLowerCase()
+    traceNormalized = trimmedQuery
     // Cache key uses the NORMALIZED query so AR/EN variants of the same intent share cache.
     const cacheKey = `${store}:${trimmedQuery}`
     console.log(`[${store}] original="${originalQuery}" normalized_query="${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
@@ -1179,6 +1292,13 @@ Deno.serve(async (req) => {
 
       if (cached && Array.isArray(cached.results) && cached.results.length > 0) {
         console.log(`[${store}] Cache hit (${cached.results.length} products)`)
+        emitPipelineTrace({
+          store, original_query: originalQuery, normalized_query: trimmedQuery,
+          stages_attempted: [], stage_used: 'API',
+          fallback_triggered: false, fallback_mandatory: false, fallback_reason: 'NONE',
+          latency_ms: Date.now() - handlerStart,
+          items_found: cached.results.length, success: true,
+        })
         return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
       }
     }
@@ -1194,10 +1314,10 @@ Deno.serve(async (req) => {
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     let txId: string | null = null
 
-    // Try expanded queries in order; first variant that returns ≥1 product wins.
-    // Existing pipeline (stage 1/2/3) is invoked unchanged for each variant.
     let pipeline: PipelineResult = {
-      products: [], stage_used: 'FAIL', attempts: 0, usedFallback: false, avgRelevance: 0, invalidCount: 0,
+      products: [], stage_used: 'FAIL', stages_attempted: [], attempts: 0,
+      usedFallback: false, fallback_mandatory: false, fallback_reason: 'NONE',
+      avgRelevance: 0, invalidCount: 0, totalLatencyMs: 0,
     }
     let usedQuery = trimmedQuery
     try {
@@ -1210,14 +1330,17 @@ Deno.serve(async (req) => {
             return !!txId
           },
         })
-        // Accumulate attempts across variants for honest telemetry.
         pipeline = {
           products: res.products,
           stage_used: res.stage_used,
+          stages_attempted: [...pipeline.stages_attempted, ...res.stages_attempted],
           attempts: pipeline.attempts + res.attempts,
           usedFallback: res.usedFallback || pipeline.usedFallback,
+          fallback_mandatory: res.fallback_mandatory || pipeline.fallback_mandatory,
+          fallback_reason: res.products.length > 0 ? 'NONE' : res.fallback_reason,
           avgRelevance: res.avgRelevance,
           invalidCount: res.invalidCount,
+          totalLatencyMs: res.totalLatencyMs,
         }
         usedQuery = variant
         if (res.products.length > 0) break
@@ -1232,10 +1355,20 @@ Deno.serve(async (req) => {
         invalid_items_count: 0, selected_stores: [store], routing_scores: {},
       })
       persistRegressionLog(supabaseUrl, supabaseKey, store, 'FAIL', errLatency, errBenchmark)
+      emitPipelineTrace({
+        store, original_query: originalQuery, normalized_query: trimmedQuery,
+        stages_attempted: pipeline.stages_attempted, stage_used: 'FAIL',
+        fallback_triggered: pipeline.usedFallback,
+        fallback_mandatory: true, fallback_reason: 'NATIVE_ERROR',
+        latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+        error: scrapeErr instanceof Error ? scrapeErr.message : String(scrapeErr),
+      })
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
         stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
+        fallback_mandatory: true, fallback_reason: 'NATIVE_ERROR',
+        stages_attempted: pipeline.stages_attempted,
         semantic_intent: intent, expanded_queries_count: expanded.length,
         error: String(scrapeErr),
         benchmark: errBenchmark,
@@ -1294,6 +1427,9 @@ Deno.serve(async (req) => {
       query: trimmedQuery,
       used_query: usedQuery,
       stage_used: pipeline.stage_used,
+      stages_attempted: pipeline.stages_attempted,
+      fallback_mandatory: pipeline.fallback_mandatory,
+      fallback_reason: pipeline.fallback_reason,
       attempts: pipeline.attempts,
       latency_ms: totalLatencyMs,
       items: products.length,
@@ -1321,7 +1457,19 @@ Deno.serve(async (req) => {
     // ── Persist benchmark to regression_logs (fire-and-forget) ──
     persistRegressionLog(supabaseUrl, supabaseKey, store, pipeline.stage_used, totalLatencyMs, benchmark)
 
-    // ── Part 6: Mandatory response contract (Phase 4 fields are ADDITIVE) ──
+    // ── Final PIPELINE_TRACE — one per request, even on FAIL stage ──
+    emitPipelineTrace({
+      store, original_query: originalQuery, normalized_query: trimmedQuery,
+      stages_attempted: pipeline.stages_attempted,
+      stage_used: pipeline.stage_used,
+      fallback_triggered: usedFallback,
+      fallback_mandatory: pipeline.fallback_mandatory,
+      fallback_reason: pipeline.fallback_reason,
+      latency_ms: Date.now() - handlerStart,
+      items_found: products.length,
+      success: products.length > 0,
+    })
+
     return new Response(JSON.stringify({
       success: true,
       products,
@@ -1329,19 +1477,35 @@ Deno.serve(async (req) => {
       store,
       usedFallback,
       stage_used: pipeline.stage_used,
+      stages_attempted: pipeline.stages_attempted,
+      fallback_mandatory: pipeline.fallback_mandatory,
+      fallback_reason: pipeline.fallback_reason,
       attempts: pipeline.attempts,
       latency_ms: totalLatencyMs,
       avg_relevance_score: pipeline.avgRelevance,
       invalid_items_count: pipeline.invalidCount,
-      // Phase 4 — additive semantic telemetry
       semantic_intent: intent,
       expanded_queries_count: expanded.length,
       used_query: usedQuery,
-      // Post-mortem self-evaluation
       benchmark,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
+    // Outer catch — even an unexpected crash MUST leave a PIPELINE_TRACE.
     console.error('Error:', error)
-    return new Response(JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    emitPipelineTrace({
+      store: traceStore, original_query: traceOriginal, normalized_query: traceNormalized,
+      stages_attempted: [], stage_used: 'FAIL',
+      fallback_triggered: false, fallback_mandatory: false,
+      fallback_reason: 'INVALID_RESPONSE',
+      latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return new Response(JSON.stringify({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stage_used: 'FAIL',
+      fallback_mandatory: false,
+      fallback_reason: 'INVALID_RESPONSE',
+    }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   }
 })
