@@ -120,11 +120,13 @@ export async function searchStore(
 }
 
 const WHITELISTED_DOMAINS = [
+  // General
   'amazon.eg', 'noon.com', 'jumia.com.eg', 'btech.com',
-  '2b.com.eg', 'tradeline.com.eg', 'rfrsh.me', 'rayashop.com',
-  'select.eg', 'compumarts.com', 'elnekhely.com',
-  'sigma-computer.com', 'mobileshop.com.eg', 'dream2000.com',
-  'ishop.com.eg', 'switchplus.eg', 'maximumhardware.com', 'dubaiphone.eg',
+  '2b.com.eg', 'rayashop.com', 'dream2000.com', 'cairosales.com',
+  'select.eg',
+  // Apple specialists
+  'tradeline.com.eg', 'rfrsh.me', 'switchplus.eg',
+  'ishopegypt.com', 'myplus.com.eg',
 ];
 
 const BRAND_EXCLUSIONS: Record<string, string[]> = {
