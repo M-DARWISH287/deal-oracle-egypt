@@ -1,17 +1,23 @@
 import { supabase } from '@/integrations/supabase/client';
+import { canonicalizeQuery, routeStores } from '@/lib/semantic';
 
-// ── BIG 5 ARCHITECTURE ──
-// Strategic pivot: focus exclusively on the 5 most reliable Egyptian stores.
-// All 5 are searched on every query (no smart routing / no Apple specialists).
+// ── BIG 5 ARCHITECTURE + PHASE 4 SMART ROUTER ──
+// All 5 stores remain in the catalog. The Smart Store Router (semantic layer)
+// picks the top-N most relevant stores per query so we stop broadcasting blindly.
 export const ALL_STORES = [
   'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', '2B Egypt',
 ] as const;
 
 export type StoreName = typeof ALL_STORES[number];
 
-/** Big 5: every query hits all 5 stores. */
-export function getRelevantStores(_query: string): StoreName[] {
-  return [...ALL_STORES];
+/**
+ * Phase 4: returns the top-N stores by semantic affinity for the query.
+ * Low-confidence intent → full broadcast (preserves coverage). Default top-N = 3.
+ */
+export function getRelevantStores(query: string, topN = 3): StoreName[] {
+  const intent = canonicalizeQuery(query || '');
+  const { selected } = routeStores(intent, ALL_STORES, topN);
+  return selected as StoreName[];
 }
 
 export interface RawProduct {

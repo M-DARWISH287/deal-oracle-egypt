@@ -1,4 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+// PHASE 4 — semantic intelligence layer (additive; pipeline untouched)
+import { canonicalizeQuery, expandQueries, semanticRerank, type SemanticIntent } from './semantic.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -1062,24 +1064,45 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ── DETERMINISTIC 3-STAGE RETRIEVAL ──
+    // ── PHASE 4 — SEMANTIC LAYER (runs BEFORE the pipeline; pipeline contract unchanged) ──
+    const intent: SemanticIntent = canonicalizeQuery(trimmedQuery)
+    const expanded = expandQueries(intent, 4)
+    console.log(`[${store}] semantic intent=${JSON.stringify(intent.entities)} conf=${intent.confidence} expanded=${expanded.length}`)
+
+    // ── DETERMINISTIC 3-STAGE RETRIEVAL — driven by semantic-expanded queries ──
     const requestStart = Date.now()
     const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     let txId: string | null = null
 
-    // Cache hit on cached result already returned above. Cache miss → enter pipeline.
-    let pipeline: PipelineResult
+    // Try expanded queries in order; first variant that returns ≥1 product wins.
+    // Existing pipeline (stage 1/2/3) is invoked unchanged for each variant.
+    let pipeline: PipelineResult = {
+      products: [], stage_used: 'FAIL', attempts: 0, usedFallback: false, avgRelevance: 0, invalidCount: 0,
+    }
+    let usedQuery = trimmedQuery
     try {
-      pipeline = await runRetrievalPipeline(config, trimmedQuery, store, firecrawlKey, {
-        // Stage 3 only reserves a credit when actually invoked. For 'firecrawl'-method
-        // stores (Noon, 2B), Stages 1 & 2 are no-ops so the pipeline goes straight to S3.
-        reserveFirecrawlCredit: async () => {
-          if (!user_id) return true   // anonymous users always allowed
-          txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-          return !!txId
-        },
-      })
+      for (const variant of expanded) {
+        if (Date.now() - requestStart > MAX_TOTAL_MS - 1000) break
+        const res = await runRetrievalPipeline(config, variant, store, firecrawlKey, {
+          reserveFirecrawlCredit: async () => {
+            if (!user_id) return true
+            txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, variant)
+            return !!txId
+          },
+        })
+        // Accumulate attempts across variants for honest telemetry.
+        pipeline = {
+          products: res.products,
+          stage_used: res.stage_used,
+          attempts: pipeline.attempts + res.attempts,
+          usedFallback: res.usedFallback || pipeline.usedFallback,
+          avgRelevance: res.avgRelevance,
+          invalidCount: res.invalidCount,
+        }
+        usedQuery = variant
+        if (res.products.length > 0) break
+      }
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
       console.error(`[${store}] Pipeline error:`, scrapeErr)
@@ -1087,6 +1110,7 @@ Deno.serve(async (req) => {
         success: true, products: [], cached: false, store,
         stage_used: 'FAIL', attempts: 0, latency_ms: Date.now() - requestStart,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
+        semantic_intent: intent, expanded_queries_count: expanded.length,
         error: String(scrapeErr),
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
@@ -1105,6 +1129,9 @@ Deno.serve(async (req) => {
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
     if (products.length < beforeCount) console.log(`[${store}] Intent post-filter: ${beforeCount} -> ${products.length}`)
 
+    // ── PHASE 4 — semantic re-ranking (additive: re-orders, never deletes) ──
+    products = semanticRerank(products as any, intent) as typeof products
+
     // ── UPSERT cache ──
     if (products.length > 0) {
       const writeClient = createClient(supabaseUrl, supabaseKey)
@@ -1117,11 +1144,12 @@ Deno.serve(async (req) => {
 
     const totalLatencyMs = Date.now() - requestStart
 
-    // ── Part 7: Structured metric log (single line, JSON, easy to grep + ship to BI) ──
+    // ── Part 7: Structured metric log + Phase 4 semantic telemetry (additive fields) ──
     console.log(JSON.stringify({
       kind: 'scrape_metric',
       store,
       query: trimmedQuery,
+      used_query: usedQuery,
       stage_used: pipeline.stage_used,
       attempts: pipeline.attempts,
       latency_ms: totalLatencyMs,
@@ -1129,6 +1157,8 @@ Deno.serve(async (req) => {
       avg_relevance_score: pipeline.avgRelevance,
       invalid_items_count: pipeline.invalidCount,
       usedFallback,
+      semantic_intent: intent,
+      expanded_queries_count: expanded.length,
     }))
 
     // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
@@ -1144,7 +1174,7 @@ Deno.serve(async (req) => {
       console.warn(`[${store}] search_logs insert exception:`, logErr)
     }
 
-    // ── Part 6: Mandatory response contract ──
+    // ── Part 6: Mandatory response contract (Phase 4 fields are ADDITIVE) ──
     return new Response(JSON.stringify({
       success: true,
       products,
@@ -1156,6 +1186,10 @@ Deno.serve(async (req) => {
       latency_ms: totalLatencyMs,
       avg_relevance_score: pipeline.avgRelevance,
       invalid_items_count: pipeline.invalidCount,
+      // Phase 4 — additive semantic telemetry
+      semantic_intent: intent,
+      expanded_queries_count: expanded.length,
+      used_query: usedQuery,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
