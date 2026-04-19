@@ -58,7 +58,53 @@ const EARLY_EXIT_MIN_ITEMS = 5       // Part 9 — early exit threshold
 const EARLY_EXIT_MIN_RELEVANCE = 80  // Part 9 — early exit threshold
 
 // Stage label union (Part 1 — single source of truth).
+// 'UNKNOWN' is intentionally NOT in this union — every registered store MUST resolve
+// to one of these labels. Unknown stores are rejected at the handler level with HTTP 400.
 type StageUsed = 'API' | 'RETRY' | 'FIRECRAWL' | 'FAIL'
+
+// ── ARABIC → ENGLISH BRAND TOKEN MAP (deterministic pre-routing normalization) ──
+// Purpose: ensure Arabic queries hit native scraper URLs that index English brand tokens.
+// Rules: token-level replacement ONLY, numbers preserved, mixed AR/EN safe, URL-safe output.
+// We do NOT translate full sentences, do NOT touch model numbers, and do NOT remove
+// trailing variant words ("pro", "max", "ultra", "256") — they pass through unchanged.
+const AR_BRAND_MAP: Record<string, string> = {
+  'ايفون': 'iphone', 'آيفون': 'iphone', 'أيفون': 'iphone',
+  'ايباد': 'ipad', 'آيباد': 'ipad',
+  'ماكبوك': 'macbook', 'ماك بوك': 'macbook',
+  'ايربودز': 'airpods', 'إيربودز': 'airpods',
+  'سامسونج': 'samsung', 'سامسونغ': 'samsung',
+  'جالاكسي': 'galaxy', 'جلاكسي': 'galaxy',
+  'شاومي': 'xiaomi', 'ريدمي': 'redmi', 'بوكو': 'poco',
+  'اوبو': 'oppo', 'أوبو': 'oppo',
+  'هواوي': 'huawei', 'هونر': 'honor', 'ريلمي': 'realme',
+  'فيفو': 'vivo', 'نوكيا': 'nokia', 'سوني': 'sony',
+  'بلايستيشن': 'playstation', 'بلاي ستيشن': 'playstation',
+  'لينوفو': 'lenovo', 'ديل': 'dell',
+  'ابل': 'apple', 'آبل': 'apple', 'أبل': 'apple',
+  'برو': 'pro', 'ماكس': 'max', 'الترا': 'ultra', 'بلس': 'plus',
+  'ميني': 'mini', 'لايت': 'lite',
+}
+
+// Normalize a query for execution. Returns { execution, original }.
+//   - execution: Arabic brand tokens replaced with English equivalents; numbers preserved;
+//                Arabic-Indic digits → ASCII; safe to URL-encode.
+//   - original: the untouched user input, used ONLY for logs / telemetry.
+export function normalizeQuery(raw: string): { execution: string; original: string } {
+  const original = (raw || '').trim()
+  if (!original) return { execution: '', original }
+  // Arabic-Indic → ASCII digits (so "١٥" becomes "15" before URL encoding)
+  let s = original
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
+  // Multi-word phrases first (longest-first) so "ماك بوك" beats "بوك"
+  const entries = Object.entries(AR_BRAND_MAP).sort((a, b) => b[0].length - a[0].length)
+  for (const [ar, en] of entries) {
+    if (s.includes(ar)) s = s.split(ar).join(` ${en} `)
+  }
+  // Collapse whitespace, trim
+  const execution = s.replace(/\s+/g, ' ').trim()
+  return { execution, original }
+}
 
 // Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
 function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
@@ -763,7 +809,31 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // B.TECH: native via Next.js Server Action (sub-2s structured JSON, no Firecrawl).
   // On 0 results (e.g. action ID rotated post-deploy), Safety Valve falls back to Firecrawl.
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
+  // NOTE: Carrefour is NOT registered. Per MVP decision, only the Big-5 above are wired.
+  // Any request for an unregistered store is rejected at the handler with HTTP 400 — no
+  // store may ever resolve to stage_used="UNKNOWN" or a missing handler.
 }
+
+// ── REGISTRY VALIDATION (runs once at module load) ──
+// Guarantees: every registered store has a searchUrl, a valid method, and — when method
+// is 'native' — a defined nativeScraper handler. Throws on misconfiguration so a broken
+// deploy fails loudly instead of silently returning UNKNOWN/empty results in production.
+;(function validateStoreRegistry() {
+  const errors: string[] = []
+  for (const [name, cfg] of Object.entries(STORE_CONFIGS)) {
+    if (typeof cfg.searchUrl !== 'function') errors.push(`${name}: missing searchUrl()`)
+    if (cfg.method !== 'native' && cfg.method !== 'firecrawl') errors.push(`${name}: invalid method "${cfg.method}"`)
+    if (cfg.method === 'native' && typeof cfg.nativeScraper !== 'function') {
+      errors.push(`${name}: method=native but nativeScraper handler is missing`)
+    }
+  }
+  if (errors.length > 0) {
+    const msg = `[STORE_REGISTRY] CRITICAL — invalid store configuration:\n  - ${errors.join('\n  - ')}`
+    console.error(msg)
+    throw new Error(msg)
+  }
+  console.log(`[STORE_REGISTRY] OK — ${Object.keys(STORE_CONFIGS).length} stores wired: ${Object.keys(STORE_CONFIGS).join(', ')}`)
+})()
 
 // ── Scraper: Firecrawl (Stage 3 multi-strategy fallback) ──
 // Attempt 1 (stage 1): waitFor=5000, NO scroll — fastest path, works for static SSR pages.
@@ -998,23 +1068,39 @@ async function runRetrievalPipeline(
     }
   }
 
-  // ── STAGE 3: FIRECRAWL (only if Stages 1+2 failed AND we can afford it) ──
-  if (bestProducts.length === 0 && firecrawlKey && remainingMs() > 3000) {
-    const creditOk = await options.reserveFirecrawlCredit()
-    if (creditOk) {
-      attempts++
-      const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
-      console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms`)
-      if (s3.ok) {
-        stage_used = 'FIRECRAWL'; usedFallback = true
-        bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
-      }
+  // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE) ──
+  // Per safety rule: if native/API failed OR returned empty, Firecrawl MUST be attempted.
+  // Only blockers allowed: missing API key, exhausted time budget, denied credit reservation.
+  let fallback_reason: string | null = null
+  if (bestProducts.length === 0) {
+    if (!firecrawlKey) {
+      fallback_reason = 'firecrawl_key_missing'
+      console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured`)
+    } else if (remainingMs() <= 3000) {
+      fallback_reason = 'time_budget_exhausted'
+      console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining`)
     } else {
-      console.log(`[${store}] Stage 3 skipped — credit reservation failed`)
+      const creditOk = await options.reserveFirecrawlCredit()
+      if (!creditOk) {
+        fallback_reason = 'credit_reserve_failed'
+        console.warn(`[${store}] Stage 3 SKIPPED — credit reservation failed`)
+      } else {
+        attempts++
+        console.log(`[${store}] FALLBACK_TRIGGERED_FIRECRAWL reason=${hasNative ? 'native_empty_or_error' : 'firecrawl_only_store'}`)
+        const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
+        console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms`)
+        if (s3.ok) {
+          stage_used = 'FIRECRAWL'; usedFallback = true
+          bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
+        } else {
+          fallback_reason = 'firecrawl_returned_empty'
+        }
+      }
     }
   }
 
   if (bestProducts.length === 0) stage_used = 'FAIL'
+  console.log(`[${store}] PIPELINE_DONE stage_used=${stage_used} fallback_triggered=${usedFallback} fallback_reason=${fallback_reason ?? 'none'} attempts=${attempts} latency=${elapsed()}ms`)
   return { products: bestProducts, stage_used, attempts, usedFallback,
     avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
 }
@@ -1074,9 +1160,14 @@ Deno.serve(async (req) => {
       }
     }
 
-    const trimmedQuery = query.trim().toLowerCase()
+    // ── DETERMINISTIC NORMALIZATION (runs BEFORE routing) ──
+    // Arabic brand tokens → English equivalents so native scraper URLs (which index
+    // English brand keywords) get hits. Original query preserved for logs/cache key.
+    const { execution: normalizedQuery, original: originalQuery } = normalizeQuery(query)
+    const trimmedQuery = normalizedQuery.toLowerCase()
+    // Cache key uses the NORMALIZED query so AR/EN variants of the same intent share cache.
     const cacheKey = `${store}:${trimmedQuery}`
-    console.log(`[${store}] Query: "${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
+    console.log(`[${store}] original="${originalQuery}" normalized_query="${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
 
     // ── Check cache (skipped on force refresh) ──
     if (!force_refresh) {
