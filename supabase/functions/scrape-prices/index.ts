@@ -785,13 +785,13 @@ async function callFirecrawlOnce(
 
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   try {
-    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false })
-    console.log(`[Firecrawl] ${storeName}: stage-1 returned ${products.length} raw products`)
+    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false, scroll: false })
+    console.log(`[Firecrawl] ${storeName}: stage-1 (no scroll) returned ${products.length} raw products`)
 
-    // Stage 2 retry on 0 results: 9s wait + alternate selector prompt.
+    // Attempt 2 on 0 results: 9s wait + scroll + alternate selector prompt.
     if (products.length === 0) {
-      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=9000ms, alternate prompt)`)
-      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true })
+      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=9000ms, scroll, alternate prompt)`)
+      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true, scroll: true })
       console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
     }
     return normalizeProducts(products, storeName, query)
