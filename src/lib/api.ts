@@ -128,6 +128,45 @@ const ACCESSORY_KEYWORDS_CLIENT = [
   'film', 'lens protector', 'camera protector',
 ];
 
+// ── GLOBAL RELEVANCE VALIDATOR (client mirror of the edge-function rules) ──
+// Generic, brand-agnostic. Strict numeric matching, ≥60% non-numeric token overlap.
+function normalizeForRelevance(s: string): string {
+  if (!s) return '';
+  return s
+    .toLowerCase()
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
+    .replace(/[\u064B-\u0652\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function tokenizeForRelevance(s: string): string[] {
+  return normalizeForRelevance(s)
+    .split(/[^a-z0-9\u0600-\u06FF]+/)
+    .filter(t => t.length >= 2);
+}
+
+export function validateRelevance(query: string, title: string): boolean {
+  const qTokens = tokenizeForRelevance(query);
+  const tTokens = tokenizeForRelevance(title);
+  if (qTokens.length === 0 || tTokens.length === 0) return false;
+  const tSet = new Set(tTokens);
+  const qNumbers = qTokens.filter(t => /^\d+$/.test(t));
+  const qWords = qTokens.filter(t => !/^\d+$/.test(t));
+  for (const n of qNumbers) if (!tSet.has(n)) return false;
+  if (qWords.length === 0) return qNumbers.length > 0;
+  let hits = 0;
+  for (const w of qWords) if (tSet.has(w)) hits++;
+  const required = Math.max(1, Math.ceil(qWords.length * 0.6));
+  return hits >= required;
+}
+
 export function clientFilterWithFallback(
   products: Product[], query: string
 ): { strict: Product[]; relaxed: Product[] } {
