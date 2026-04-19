@@ -1228,7 +1228,7 @@ Deno.serve(async (req) => {
     }
 
     // ── Persist benchmark to regression_logs (fire-and-forget) ──
-    persistRegressionLog(supabaseUrl, supabaseKey, store, totalLatencyMs, benchmark)
+    persistRegressionLog(supabaseUrl, supabaseKey, store, pipeline.stage_used, totalLatencyMs, benchmark)
 
     // ── Part 6: Mandatory response contract (Phase 4 fields are ADDITIVE) ──
     return new Response(JSON.stringify({
