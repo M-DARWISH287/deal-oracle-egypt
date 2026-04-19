@@ -478,7 +478,7 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
       })
     }
     console.log(`[2B native] ${items.length} raw items`)
-    return normalizeProducts(items, '2B Egypt')
+    return normalizeProducts(items, '2B Egypt', query)
   } catch (err) {
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
     return []
