@@ -111,6 +111,13 @@ const SearchResults = () => {
     return strict.length > 0 ? strict : relaxed;
   }, [products, query]);
 
+  useEffect(() => {
+    if (sliderProducts.length > 0 && !isLoading) {
+      const prices = sliderProducts.flatMap(p => p.offers.map(o => o.price));
+      setPriceRange([Math.floor(Math.min(...prices)), Math.ceil(Math.max(...prices))]);
+    }
+  }, [sliderProducts.length, isLoading]);
+
   // Dev observability: log the engine meta whenever the ranked set changes,
   // so we can confirm in the browser console that the Best Value engine fired
   // and which stores fed into the ranking.
