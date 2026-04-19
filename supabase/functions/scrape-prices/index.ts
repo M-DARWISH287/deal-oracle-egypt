@@ -1,6 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // PHASE 4 — semantic intelligence layer (additive; pipeline untouched)
-import { canonicalizeQuery, expandQueries, semanticRerank, type SemanticIntent } from './semantic.ts'
+import { canonicalizeQuery, expandQueries, semanticRerank, routeStores, type SemanticIntent } from './semantic.ts'
+import { runBenchmark } from './benchmark.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
