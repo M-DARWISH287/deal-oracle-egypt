@@ -992,6 +992,7 @@ interface StageResult {
   invalidCount: number
   latencyMs: number
   ok: boolean              // true if at least 1 valid product
+  failure: FallbackReason | null  // why the stage produced nothing (null if ok)
 }
 
 async function runStage1_API(
@@ -999,11 +1000,13 @@ async function runStage1_API(
   query: string, store: string,
 ): Promise<StageResult> {
   const t0 = Date.now()
-  const raw = await raceWithTimeout(scraper(query, 1), STAGE1_TIMEOUT_MS, `${store} S1-API`)
-  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  const outcome = await raceWithTimeoutTraced(scraper(query, 1), STAGE1_TIMEOUT_MS, `${store} S1-API`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(outcome.products, query)
+  const ok = valid.length > 0
   return {
-    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok: valid.length > 0,
+    products: valid, rawCount: outcome.products.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok,
+    failure: ok ? null : (outcome.failure ?? 'EMPTY_RESULT'),
   }
 }
 
@@ -1016,11 +1019,13 @@ async function runStage2_Retry(
   await jitterSleep()
   // Use the lower of STAGE2_TIMEOUT_MS or remainingMs to respect Part 10 global budget.
   const timeoutMs = Math.max(1500, Math.min(STAGE2_TIMEOUT_MS, remainingMs - 500))
-  const raw = await raceWithTimeout(scraper(query, 2), timeoutMs, `${store} S2-RETRY`)
-  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  const outcome = await raceWithTimeoutTraced(scraper(query, 2), timeoutMs, `${store} S2-RETRY`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(outcome.products, query)
+  const ok = valid.length > 0
   return {
-    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok: valid.length > 0,
+    products: valid, rawCount: outcome.products.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok,
+    failure: ok ? null : (outcome.failure ?? 'EMPTY_RESULT'),
   }
 }
 
@@ -1028,11 +1033,21 @@ async function runStage3_Firecrawl(
   query: string, store: string, searchUrl: string, firecrawlKey: string,
 ): Promise<StageResult> {
   const t0 = Date.now()
-  const raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
+  let raw: RawProduct[] = []
+  let failureBase: FallbackReason | null = null
+  try {
+    raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
+    if (!Array.isArray(raw)) { failureBase = 'INVALID_RESPONSE'; raw = [] }
+  } catch (err) {
+    console.error(`[${store}] Stage 3 (FIRECRAWL) threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
+    failureBase = 'NATIVE_ERROR'
+  }
   const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  const ok = valid.length > 0
   return {
     products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok: valid.length > 0,
+    latencyMs: Date.now() - t0, ok,
+    failure: ok ? null : (failureBase ?? 'EMPTY_RESULT'),
   }
 }
 
