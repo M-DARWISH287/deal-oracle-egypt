@@ -902,22 +902,23 @@ Deno.serve(async (req) => {
     try {
       if (config.method === 'native') {
         if (!config.nativeScraper) throw new Error('Native scraper not configured')
-        // 12-SECOND RULE: race the native scraper. If stalls past 12s, fall back to Firecrawl.
-        products = await raceWithTimeout(config.nativeScraper(trimmedQuery), NATIVE_RACE_TIMEOUT_MS, store)
+        // ── 3-STAGE RETRIEVAL ──
+        // Stages 1 & 2: native scraper (3s each, Stage 2 = UA rotation + modified params).
+        products = await runNativeStages(config.nativeScraper, trimmedQuery, store)
 
-        // ── Safety Valve: native returned 0 → silently fall back to Firecrawl ──
+        // Stage 3: Firecrawl multi-strategy fallback (5s no-scroll → 9s + scroll + alt prompt).
         if (products.length === 0 && firecrawlKey) {
-          console.log(`[${store}] Safety Valve triggered — native returned 0, trying Firecrawl fallback`)
+          console.log(`[${store}] Stage 3 (Firecrawl multi-strategy) — both native stages returned 0`)
           if (user_id) {
             txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-            if (!txId) console.log(`[${store}] Safety Valve skipped — no credits`)
+            if (!txId) console.log(`[${store}] Stage 3 skipped — no credits`)
           }
           if (!user_id || txId) {
             const fallback = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
             if (fallback.length > 0) {
               products = fallback
               usedFallback = true
-              console.log(`[${store}] Safety Valve recovered ${products.length} items via Firecrawl`)
+              console.log(`[${store}] Stage 3 recovered ${products.length} items via Firecrawl`)
             }
           }
         }
