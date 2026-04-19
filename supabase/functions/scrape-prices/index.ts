@@ -816,7 +816,175 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
   }
 }
 
-// ── Credit helpers (stateless) ──
+// ════════════════════════════════════════════════════════════════════
+// ── DETERMINISTIC 3-STAGE RETRIEVAL ENGINE ──
+// Future-proof (Part 12): runStage1_API / runStage2_Retry / runStage3_Firecrawl
+// are pure functions. Pluggable into Noon / 2B / any future store.
+// ════════════════════════════════════════════════════════════════════
+
+// Quality assessor (Part 5 + Part 8). Splits products into valid/invalid by:
+//   - relevance score >= MIN_RELEVANCE_SCORE
+//   - not an accessory (already filtered upstream by acceptItem, double-checked here)
+//   - has a numeric price > 0
+//   - normalizeProducts has already enforced price floor + brand match
+function assessQuality(products: RawProduct[], query: string): {
+  valid: RawProduct[]; avgRelevance: number; invalidCount: number;
+} {
+  if (products.length === 0) return { valid: [], avgRelevance: 0, invalidCount: 0 }
+  const valid: RawProduct[] = []
+  let invalidCount = 0
+  let scoreSum = 0
+  for (const p of products) {
+    const titleBlob = `${p.name} ${p.name_ar || ''}`
+    const rel = validateRelevance(query, titleBlob)
+    const score = Math.max(rel.score, p.confidenceScore ?? 0)
+    const priceOk = typeof p.price === 'number' && p.price > 0
+    if (rel.isRelevant && score >= MIN_RELEVANCE_SCORE && priceOk) {
+      valid.push({ ...p, confidenceScore: score })
+      scoreSum += score
+    } else {
+      invalidCount++
+    }
+  }
+  const avgRelevance = valid.length > 0 ? Math.round(scoreSum / valid.length) : 0
+  return { valid, avgRelevance, invalidCount }
+}
+
+// ── STAGE RUNNERS ──
+interface StageResult {
+  products: RawProduct[]   // already quality-validated
+  rawCount: number         // count BEFORE quality assessment (for observability)
+  avgRelevance: number
+  invalidCount: number
+  latencyMs: number
+  ok: boolean              // true if at least 1 valid product
+}
+
+async function runStage1_API(
+  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
+  query: string, store: string,
+): Promise<StageResult> {
+  const t0 = Date.now()
+  const raw = await raceWithTimeout(scraper(query, 1), STAGE1_TIMEOUT_MS, `${store} S1-API`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  return {
+    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok: valid.length > 0,
+  }
+}
+
+async function runStage2_Retry(
+  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
+  query: string, store: string, remainingMs: number,
+): Promise<StageResult> {
+  const t0 = Date.now()
+  // Jitter (300-800ms) ensures retry is not identical to Stage 1 (Part 3).
+  await jitterSleep()
+  // Use the lower of STAGE2_TIMEOUT_MS or remainingMs to respect Part 10 global budget.
+  const timeoutMs = Math.max(1500, Math.min(STAGE2_TIMEOUT_MS, remainingMs - 500))
+  const raw = await raceWithTimeout(scraper(query, 2), timeoutMs, `${store} S2-RETRY`)
+  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  return {
+    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok: valid.length > 0,
+  }
+}
+
+async function runStage3_Firecrawl(
+  query: string, store: string, searchUrl: string, firecrawlKey: string,
+): Promise<StageResult> {
+  const t0 = Date.now()
+  const raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
+  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
+  return {
+    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
+    latencyMs: Date.now() - t0, ok: valid.length > 0,
+  }
+}
+
+// Top-level orchestrator (Part 1-12). Runs Stage 1 → 2 → 3 deterministically
+// with quality gates, early exit, structured logs, and a global time budget.
+interface PipelineResult {
+  products: RawProduct[]
+  stage_used: StageUsed
+  attempts: number
+  usedFallback: boolean
+  avgRelevance: number
+  invalidCount: number
+  totalLatencyMs: number
+}
+
+async function runRetrievalPipeline(
+  config: StoreConfig, query: string, store: string,
+  firecrawlKey: string | undefined,
+  options: { reserveFirecrawlCredit: () => Promise<boolean>; },
+): Promise<PipelineResult> {
+  const t0 = Date.now()
+  let stage_used: StageUsed = 'API'
+  let attempts = 0
+  let bestProducts: RawProduct[] = []
+  let bestAvg = 0
+  let bestInvalid = 0
+  let usedFallback = false
+
+  const elapsed = () => Date.now() - t0
+  const remainingMs = () => MAX_TOTAL_MS - elapsed()
+
+  // For 'firecrawl'-method stores (Noon, 2B), skip native stages entirely.
+  const hasNative = config.method === 'native' && !!config.nativeScraper
+
+  // ── STAGE 1: API ──
+  if (hasNative) {
+    attempts++
+    const s1 = await runStage1_API(config.nativeScraper!, query, store)
+    console.log(`[${store}] Stage 1 (API): raw=${s1.rawCount} valid=${s1.products.length} avgRel=${s1.avgRelevance} ${s1.latencyMs}ms`)
+    if (s1.ok) {
+      stage_used = 'API'
+      bestProducts = s1.products; bestAvg = s1.avgRelevance; bestInvalid = s1.invalidCount
+      // Part 9: early exit (Stage 1 was good enough — skip 2 & 3).
+      if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
+        return { products: bestProducts, stage_used, attempts, usedFallback,
+          avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
+      }
+    }
+  }
+
+  // ── STAGE 2: RETRY (only if Stage 1 failed AND time remains) ──
+  if (hasNative && bestProducts.length === 0 && remainingMs() > 2000) {
+    attempts++
+    const s2 = await runStage2_Retry(config.nativeScraper!, query, store, remainingMs())
+    console.log(`[${store}] Stage 2 (RETRY): raw=${s2.rawCount} valid=${s2.products.length} avgRel=${s2.avgRelevance} ${s2.latencyMs}ms`)
+    if (s2.ok) {
+      stage_used = 'RETRY'
+      bestProducts = s2.products; bestAvg = s2.avgRelevance; bestInvalid = s2.invalidCount
+      if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
+        return { products: bestProducts, stage_used, attempts, usedFallback,
+          avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
+      }
+    }
+  }
+
+  // ── STAGE 3: FIRECRAWL (only if Stages 1+2 failed AND we can afford it) ──
+  if (bestProducts.length === 0 && firecrawlKey && remainingMs() > 3000) {
+    const creditOk = await options.reserveFirecrawlCredit()
+    if (creditOk) {
+      attempts++
+      const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
+      console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms`)
+      if (s3.ok) {
+        stage_used = 'FIRECRAWL'; usedFallback = true
+        bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
+      }
+    } else {
+      console.log(`[${store}] Stage 3 skipped — credit reservation failed`)
+    }
+  }
+
+  if (bestProducts.length === 0) stage_used = 'FAIL'
+  return { products: bestProducts, stage_used, attempts, usedFallback,
+    avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
+}
+
 async function reserveCredits(supabaseUrl: string, serviceKey: string, userId: string, store: string, query: string): Promise<string | null> {
   const sb = createClient(supabaseUrl, serviceKey)
   try {
