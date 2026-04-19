@@ -88,7 +88,7 @@ export function canonicalizeQuery(raw: string): SemanticIntent {
   for (const f of candidates) if (f.patterns.some(p => p.test(normalized))) { family = f.family; break }
   let variant: string | undefined
   for (const v of VARIANT_SYNONYMS) if (v.patterns.some(p => p.test(normalized))) { variant = v.canonical; break }
-  const numMatch = normalized.match(/\b(\d{1,3})\b/)
+  const numMatch = normalized.match(/(?:^|[\s])(?:[a-z]?)(\d{1,3})(?=[\s]|$)/) || normalized.match(/\b(\d{1,3})\b/)
   const model_number = numMatch ? numMatch[1] : undefined
   let confidence = 0
   if (brand) confidence += 0.4; if (family) confidence += 0.3
