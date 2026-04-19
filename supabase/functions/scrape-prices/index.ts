@@ -389,87 +389,7 @@ interface BTechItem {
 }
 
 async function scrapeBTech(query: string): Promise<RawProduct[]> {
-  // Server Actions accept a JSON body. We use { search, page, size }.
-  const body = JSON.stringify([{ search: query, page: '1', size: 50 }])
-  let res: Response
-  try {
-    res = await fetchWithTimeout('https://btech.com/en', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/x-component',
-        'Next-Action': BTECH_ACTION_ID,
-        'Origin': 'https://btech.com',
-        'Referer': 'https://btech.com/en',
-        ...STEALTH_HEADERS,
-      },
-      body,
-    }, 10000)
-  } catch (err) {
-    console.error('[B.TECH] Server Action fetch failed:', err)
-    return []
-  }
-  if (!res.ok) {
-    console.error(`[B.TECH] Server Action HTTP ${res.status}`)
-    return []
-  }
-  const text = await res.text()
-  // RSC stream: lines like "<hex-id>:<json-or-string>". Find the line that
-  // starts with "1:{" and JSON-parse it. Parse defensively — if the line ID
-  // ever changes, scan all "<id>:{" prefixed lines for one with .data.items.
-  const lines = text.split('\n')
-  let payload: { data?: { items?: BTechItem[] } } | null = null
-  for (const ln of lines) {
-    const m = ln.match(/^[0-9a-f]+:(\{.*\})$/)
-    if (!m) continue
-    try {
-      const parsed = JSON.parse(m[1])
-      if (parsed && parsed.data && Array.isArray(parsed.data.items)) {
-        payload = parsed
-        break
-      }
-    } catch { /* not the JSON line — keep scanning */ }
-  }
-  if (!payload?.data?.items) {
-    console.warn('[B.TECH] Server Action returned no parsable product payload')
-    return []
-  }
-  const items = payload.data.items
-  console.log(`[B.TECH] Server Action: ${items.length} raw items`)
-
-  // Map to the shape normalizeProducts() expects (name/price/url/image).
-  return items
-    .filter(it => it && it.title && it.slug && it.price)
-    .map(it => {
-      const priceStr = it.price?.final_float_price || it.price?.final || it.price?.base || ''
-      const url = `https://btech.com/en/${it.slug}`
-      const image = it.main_image ? `${BTECH_CDN_BASE}${it.main_image}` : ''
-      const specs = (it.categories_tree || []).join(' › ')
-      return {
-        name: String(it.title),
-        name_ar: String(it.title),
-        price: priceStr,
-        url,
-        image,
-        specs,
-        store: 'B.TECH',
-      } as Partial<RawProduct>
-    })
-    // Run through the shared accept/normalize pipeline (relevance + accessories
-    // + price floor + score). normalizeProducts caps at 5 items.
-    .reduce<RawProduct[]>((_acc, _x, _i, arr) => {
-      // We can't call normalizeProducts inside reduce without a closure on `query`,
-      // so just do it once at the end.
-      return _acc
-    }, []) as never as RawProduct[]
-    // ↑ unreachable — replaced below. We do the mapping inline then call
-    //   normalizeProducts on the array.
-}
-
-// Wrap the mapping above so normalizeProducts is the single source of truth
-// for the accept-gate (relevance + accessories + score). Done as a separate
-// function for clarity.
-async function scrapeBTechNormalized(query: string): Promise<RawProduct[]> {
+  // Server Actions accept a JSON body. We use { search, page, size:50 }.
   const body = JSON.stringify([{ search: query, page: '1', size: 50 }])
   let res: Response
   try {
@@ -491,6 +411,9 @@ async function scrapeBTechNormalized(query: string): Promise<RawProduct[]> {
   }
   if (!res.ok) { console.error(`[B.TECH] Server Action HTTP ${res.status}`); return [] }
   const text = await res.text()
+
+  // RSC stream: lines like "<hex-id>:<json>". Find the line whose JSON contains
+  // .data.items — defensive scan in case Next.js changes the line ID on rebuild.
   let payload: { data?: { items?: BTechItem[] } } | null = null
   for (const ln of text.split('\n')) {
     const m = ln.match(/^[0-9a-f]+:(\{.*\})$/)
@@ -498,12 +421,14 @@ async function scrapeBTechNormalized(query: string): Promise<RawProduct[]> {
     try {
       const parsed = JSON.parse(m[1])
       if (parsed && parsed.data && Array.isArray(parsed.data.items)) { payload = parsed; break }
-    } catch { /* skip */ }
+    } catch { /* skip non-JSON RSC frames */ }
   }
   const items = payload?.data?.items || []
   if (items.length === 0) { console.warn('[B.TECH] Server Action: 0 items in payload'); return [] }
   console.log(`[B.TECH] Server Action: ${items.length} raw items`)
 
+  // Map to the shape normalizeProducts() expects, then run the shared accept
+  // gate (relevance + accessories + score + price floor; caps at 5 items).
   const mapped: Partial<RawProduct>[] = items
     .filter(it => it && it.title && it.slug && it.price)
     .map(it => ({
@@ -518,7 +443,6 @@ async function scrapeBTechNormalized(query: string): Promise<RawProduct[]> {
 
   return normalizeProducts(mapped, 'B.TECH', query)
 }
-
 
 
 // Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
