@@ -1113,6 +1113,7 @@ Deno.serve(async (req) => {
         stage_used: 'FAIL', attempts: 0, products_count: 0, latency_ms: errLatency,
         invalid_items_count: 0, selected_stores: [store], routing_scores: {},
       })
+      persistRegressionLog(supabaseUrl, supabaseKey, store, errLatency, errBenchmark)
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
         stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
