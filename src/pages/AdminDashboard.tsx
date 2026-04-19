@@ -94,9 +94,15 @@ export default function AdminDashboard() {
     <div className="min-h-screen bg-background p-6 md:p-10" dir="ltr">
       <div className="max-w-7xl mx-auto space-y-8">
         <header className="space-y-2">
-          <div className="flex items-center gap-3">
-            <BarChart3 className="h-7 w-7 text-primary" />
-            <h1 className="text-3xl font-bold tracking-tight">Admin Dashboard</h1>
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="flex items-center gap-3">
+              <BarChart3 className="h-7 w-7 text-primary" />
+              <h1 className="text-3xl font-bold tracking-tight">Admin Dashboard</h1>
+            </div>
+            <Button onClick={handleDownloadReport} disabled={downloading} size="sm">
+              {downloading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Download className="h-4 w-4 mr-2" />}
+              Download 10-day Report
+            </Button>
           </div>
           <p className="text-muted-foreground">Search analytics &amp; market demand insights</p>
         </header>
