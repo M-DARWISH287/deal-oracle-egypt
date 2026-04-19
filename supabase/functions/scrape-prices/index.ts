@@ -1,6 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // PHASE 4 — semantic intelligence layer (additive; pipeline untouched)
-import { canonicalizeQuery, expandQueries, semanticRerank, type SemanticIntent } from './semantic.ts'
+import { canonicalizeQuery, expandQueries, semanticRerank, routeStores, type SemanticIntent } from './semantic.ts'
+import { runBenchmark } from './benchmark.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -1106,12 +1107,19 @@ Deno.serve(async (req) => {
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
       console.error(`[${store}] Pipeline error:`, scrapeErr)
+      const errLatency = Date.now() - requestStart
+      const errBenchmark = runBenchmark({
+        query: trimmedQuery, intent, expanded_queries: expanded, used_query: null,
+        stage_used: 'FAIL', attempts: 0, products_count: 0, latency_ms: errLatency,
+        invalid_items_count: 0, selected_stores: [store], routing_scores: {},
+      })
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
-        stage_used: 'FAIL', attempts: 0, latency_ms: Date.now() - requestStart,
+        stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
         semantic_intent: intent, expanded_queries_count: expanded.length,
         error: String(scrapeErr),
+        benchmark: errBenchmark,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
@@ -1144,7 +1152,23 @@ Deno.serve(async (req) => {
 
     const totalLatencyMs = Date.now() - requestStart
 
-    // ── Part 7: Structured metric log + Phase 4 semantic telemetry (additive fields) ──
+    // ── Deterministic post-mortem benchmark (zero LLM, <1ms) ──
+    const routing = routeStores(intent, [store], 1)
+    const benchmark = runBenchmark({
+      query: trimmedQuery,
+      intent,
+      expanded_queries: expanded,
+      used_query: usedQuery,
+      stage_used: pipeline.stage_used,
+      attempts: pipeline.attempts,
+      products_count: products.length,
+      latency_ms: totalLatencyMs,
+      invalid_items_count: pipeline.invalidCount,
+      selected_stores: routing.selected,
+      routing_scores: routing.scores,
+    })
+
+    // ── Part 7: Structured metric log + Phase 4 semantic telemetry + benchmark ──
     console.log(JSON.stringify({
       kind: 'scrape_metric',
       store,
@@ -1159,6 +1183,7 @@ Deno.serve(async (req) => {
       usedFallback,
       semantic_intent: intent,
       expanded_queries_count: expanded.length,
+      benchmark,
     }))
 
     // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
@@ -1190,6 +1215,8 @@ Deno.serve(async (req) => {
       semantic_intent: intent,
       expanded_queries_count: expanded.length,
       used_query: usedQuery,
+      // Post-mortem self-evaluation
+      benchmark,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
