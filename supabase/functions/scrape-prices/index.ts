@@ -405,12 +405,19 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
 //   • Amazon Egypt, Jumia, 2B Egypt → native (12s race → Firecrawl fallback)
 //   • Noon, B.TECH                  → direct Firecrawl (heavy WAF/Cloudflare)
 // ════════════════════════════════════════════════════════════════════
+// MOBILE-FOCUSED URLs: where supported, scope the search to the smartphones category
+// so the engine sees mostly phones (less accessory pollution at source).
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`,                       method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
-  'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,             method: 'native',    tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,    method: 'native',    tier: 1, nativeScraper: scrape2B },
-  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,         method: 'firecrawl', tier: 1 },
-  'B.TECH':       { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`,       method: 'firecrawl', tier: 1 },
+  // Amazon EG: rh=n:21832883031 = "Mobile Phones & Communication" node
+  'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}&i=electronics&rh=n%3A21832883031`,                            method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
+  // Jumia: catalog?q=… &category=mobile-phones-2399
+  'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}&category=mobile-phones-2399`,                       method: 'native',    tier: 1, nativeScraper: scrapeJumia },
+  // 2B Egypt: catalogsearch supports cat= filter for the mobile category id
+  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}&cat=11`,                                   method: 'native',    tier: 1, nativeScraper: scrape2B },
+  // Noon: search/?q=… &f[category]=mobiles
+  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}&f%5Bcategory%5D=mobiles`,                       method: 'firecrawl', tier: 1 },
+  // B.TECH: scoped to /mobile-tablet/mobile-phones category
+  'B.TECH':       { searchUrl: q => `https://btech.com/en/mobile-tablet/mobile-phones.html?q=${encodeURIComponent(q)}`,                               method: 'firecrawl', tier: 1 },
 }
 
 // ── Scraper: Firecrawl ──
