@@ -1,30 +1,17 @@
 import { supabase } from '@/integrations/supabase/client';
 
-// ALL 13 STORES — Golden Version (2 categories)
+// ── BIG 5 ARCHITECTURE ──
+// Strategic pivot: focus exclusively on the 5 most reliable Egyptian stores.
+// All 5 are searched on every query (no smart routing / no Apple specialists).
 export const ALL_STORES = [
-  // GENERAL (always searched, 9 stores)
-  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', 'RayaShop', '2B Egypt',
-  'Dream 2000', 'Cairo Sales', 'Select Egypt',
-  // APPLE_ONLY (4 stores — only when query mentions iPhone / Mac / iPad / AirPods)
-  'Tradeline', 'Switch Plus', 'iShop', 'MyPlus',
+  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', '2B Egypt',
 ] as const;
 
 export type StoreName = typeof ALL_STORES[number];
 
-// Apple specialist trigger: iPhone, Mac, iPad, AirPods, Apple Watch
-const APPLE_RE = /iphone|mac\b|macbook|imac|apple|ipad|airpods|apple\s*watch|آيفون|ماك|آيباد|ايربودز/i;
-
-const GENERAL_STORES: StoreName[] = [
-  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', 'RayaShop', '2B Egypt',
-  'Dream 2000', 'Cairo Sales', 'Select Egypt',
-];
-const APPLE_STORES: StoreName[] = ['Tradeline', 'Switch Plus', 'iShop', 'MyPlus'];
-
-/** Smart routing: General stores always; Apple specialists only on Apple queries. */
-export function getRelevantStores(query: string): StoreName[] {
-  const stores = new Set<StoreName>(GENERAL_STORES);
-  if (APPLE_RE.test(query)) APPLE_STORES.forEach(s => stores.add(s));
-  return Array.from(stores);
+/** Big 5: every query hits all 5 stores. */
+export function getRelevantStores(_query: string): StoreName[] {
+  return [...ALL_STORES];
 }
 
 export interface RawProduct {
@@ -94,13 +81,10 @@ export async function searchStore(
       return { success: true, products: localCached, cached: true, store, cachedAt: 'local' };
     }
   } else {
-    // Wipe local entry so future calls fetch fresh
     try { localStorage.removeItem(getLocalCacheKey(query, store)); } catch { /* ignore */ }
   }
 
   try {
-    // NOTE: user_id is NOT sent in the body — the edge function derives it from the
-    // verified JWT (auto-attached by supabase.functions.invoke when a session exists).
     const { data, error } = await supabase.functions.invoke('scrape-prices', {
       body: { query, store, force_refresh: forceRefresh },
     });
@@ -109,7 +93,6 @@ export async function searchStore(
       return { success: false, products: [], cached: false, store, error: error.message };
     }
     const result = data as StoreSearchResult;
-    // Save to localStorage if successful
     if (result.success && result.products.length > 0) {
       setLocalCache(query, store, result.products);
     }
@@ -119,14 +102,9 @@ export async function searchStore(
   }
 }
 
+// ── BIG 5 whitelisted domains ──
 const WHITELISTED_DOMAINS = [
-  // General
-  'amazon.eg', 'noon.com', 'jumia.com.eg', 'btech.com',
-  '2b.com.eg', 'rayashop.com', 'dream2000.com', 'cairosales.com',
-  'select.eg',
-  // Apple specialists
-  'tradeline.com.eg', 'rfrsh.me', 'switchplus.eg',
-  'ishopegypt.com', 'myplus.com.eg',
+  'amazon.eg', 'noon.com', 'jumia.com.eg', 'btech.com', '2b.com.eg',
 ];
 
 const BRAND_EXCLUSIONS: Record<string, string[]> = {

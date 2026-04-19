@@ -8,8 +8,8 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
-// THE 12-SECOND RULE: Native scrapers race against this internal timeout.
-// If they exceed it, we immediately fall back to Firecrawl extract mode.
+// THE 12-SECOND RULE: native scrapers race against this internal timeout.
+// If exceeded, we immediately fall back to Firecrawl extract mode.
 const NATIVE_RACE_TIMEOUT_MS = 12000
 // Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
 // runs in its own edge function invocation (client uses Promise.allSettled), so a
@@ -53,7 +53,6 @@ interface RawProduct {
 type ScrapeMethod = 'native' | 'firecrawl'
 
 interface StoreConfig {
-  // Used when method='firecrawl' OR when native fails and Safety Valve fallback fires
   searchUrl: (q: string) => string;
   method: ScrapeMethod;
   tier: 1 | 2 | 3;
@@ -78,7 +77,6 @@ function checkRefurbished(name: string): boolean {
   return /restored|renewed|refurbished|مجدد/i.test(name)
 }
 
-// Brand exclusion map: if the query mentions a brand, drop results from competitor brands.
 const BRAND_EXCLUSIONS: Record<string, string[]> = {
   iphone: ['samsung', 'galaxy', 'oppo', 'xiaomi', 'redmi', 'realme', 'huawei', 'honor', 'vivo', 'tecno', 'infinix', 'nokia'],
   apple: ['samsung', 'galaxy', 'oppo', 'xiaomi', 'redmi', 'huawei', 'honor', 'vivo'],
@@ -92,16 +90,11 @@ const BRAND_EXCLUSIONS: Record<string, string[]> = {
   huawei: ['iphone', 'samsung', 'galaxy', 'xiaomi'],
 }
 
-// Relaxed intent matcher + STRICT brand matcher.
-// - Drops Pro Max/Ultra when user typed a base variant.
-// - Drops cross-brand pollution (iPhone query → no Samsung).
 function matchesIntent(query: string, productName: string): boolean {
   const q = query.toLowerCase(); const n = productName.toLowerCase()
-  // Variant filter
   if (!q.includes('max') && !q.includes('ultra')) {
     if (n.includes('pro max') || n.includes('ultra')) return false
   }
-  // Brand filter: if query mentions a brand keyword, reject cross-brand results
   for (const [brandKw, excluded] of Object.entries(BRAND_EXCLUSIONS)) {
     if (q.includes(brandKw)) {
       if (excluded.some(bad => n.includes(bad))) return false
@@ -117,13 +110,11 @@ const ACCESSORY_KEYWORDS = [
   'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
   'film', 'glass', 'lens protector', 'camera protector',
 ]
-
 function isAccessory(name: string): boolean {
   const lower = name.toLowerCase()
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
 
-// Out-of-stock detector: drops items whose name/specs blob mentions unavailability.
 const OUT_OF_STOCK_KEYWORDS = [
   'out of stock', 'sold out', 'unavailable', 'currently unavailable',
   'نفدت الكمية', 'غير متوفر', 'نفذت الكمية', 'غير متاح',
@@ -144,39 +135,62 @@ function stripTags(s: string): string {
   return decodeHtml(s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
 }
 
-// Extract ALL prices from a block and return the LOWEST (avoid strikethrough/old price)
+// ── Strip strikethrough/old prices BEFORE extracting candidates ──
+// 2B, B.TECH, RayaShop, etc. all wrap the crossed-out original price in
+// <span class="old-price">…</span> or <s>/<del>. Removing those nodes first
+// guarantees Math.min() won't accidentally pick the higher original price.
+function stripOldPriceNodes(block: string): string {
+  return block
+    // Magento-style old price wrappers (any tag, any depth — remove via greedy class match)
+    .replace(/<(span|div|p)[^>]*class="[^"]*\b(old-price|price-was|regular-price|compare-at-price)\b[^"]*"[\s\S]*?<\/\1>/gi, ' ')
+    // <s> and <del> strikethrough
+    .replace(/<(s|del|strike)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+}
+
+// Extract ALL prices from a block and return the LOWEST.
+// CRITICAL: strip old/strikethrough price nodes first (2B "crossed-out price" bug).
 function extractLowestPrice(block: string): string | null {
+  const cleaned = stripOldPriceNodes(block)
   const candidates: number[] = []
-  // Magento data attribute
-  const dataPriceRe = /data-price-amount="([0-9.]+)"/g
+
+  // Magento explicit "final price" data attribute → highest priority
+  const finalPriceRe = /data-price-type="finalPrice"[^>]*data-price-amount="([0-9.]+)"|data-price-amount="([0-9.]+)"[^>]*data-price-type="finalPrice"/g
   let m: RegExpExecArray | null
-  while ((m = dataPriceRe.exec(block)) !== null) {
+  while ((m = finalPriceRe.exec(cleaned)) !== null) {
+    const n = parseFloat(m[1] || m[2]); if (!isNaN(n) && n > 0) candidates.push(n)
+  }
+  // Generic Magento data-price-amount (already cleaned of old-price)
+  const dataPriceRe = /data-price-amount="([0-9.]+)"/g
+  while ((m = dataPriceRe.exec(cleaned)) !== null) {
     const n = parseFloat(m[1]); if (!isNaN(n) && n > 0) candidates.push(n)
+  }
+  // .special-price wrapper (Magento sale price)
+  const specialPriceRe = /<(?:span|div)[^>]*class="[^"]*\bspecial-price\b[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div)>/gi
+  while ((m = specialPriceRe.exec(cleaned)) !== null) {
+    const num = parsePrice(stripTags(m[1]))
+    if (num !== null && num > 0) candidates.push(num)
   }
   // EGP / LE / ج.م amounts
   const egpRe = /(\d[\d,]{2,})(?:\.\d+)?\s*(?:EGP|ج\.م|LE|جنيه)/gi
-  while ((m = egpRe.exec(block)) !== null) {
+  while ((m = egpRe.exec(cleaned)) !== null) {
     const n = parseFloat(m[1].replace(/,/g, '')); if (!isNaN(n) && n > 0) candidates.push(n)
   }
-  // Generic large numbers inside price spans
+  // Generic price-class spans
   const priceSpanRe = /<(?:span|div|p|strong)[^>]*class="[^"]*\bprice\b[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div|p|strong)>/gi
-  while ((m = priceSpanRe.exec(block)) !== null) {
-    const inner = stripTags(m[1])
-    const num = parsePrice(inner)
+  while ((m = priceSpanRe.exec(cleaned)) !== null) {
+    const num = parsePrice(stripTags(m[1]))
     if (num !== null && num > 0) candidates.push(num)
   }
   if (candidates.length === 0) return null
   return String(Math.min(...candidates))
 }
 
-// Convert relative URL to absolute and reject non-product paths
 function toAbsoluteUrl(href: string, baseUrl: string): string | null {
   if (!href) return null
   let url: string
   try {
     url = href.startsWith('http') ? href : new URL(href, baseUrl).toString()
   } catch { return null }
-  // Reject non-product links
   const lower = url.toLowerCase()
   const reject = ['add-to-cart', 'addtocart', '/cart', '/login', '/account', '/wishlist',
                   '/checkout', '/customer/', 'logout', 'javascript:', 'mailto:', '#',
@@ -228,7 +242,10 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string): Raw
     .filter(p => p.price >= MINIMUM_PRICE_THRESHOLD)
 }
 
-// ── NATIVE SCRAPERS (Group 1) ──
+// ════════════════════════════════════════════════════════════════════
+// NATIVE SCRAPERS — BIG 5 ONLY (Amazon EG, Jumia, 2B Egypt)
+// Noon and B.TECH route directly to Firecrawl (heavy WAF/Cloudflare).
+// ════════════════════════════════════════════════════════════════════
 
 // Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
 async function scrapeJumia(query: string): Promise<RawProduct[]> {
@@ -274,9 +291,8 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
   }
 }
 
-// ── Amazon Egypt: native via stealth fetch ──
-// 2026 DOM: search results are <div role="listitem" data-asin="..." data-component-type="s-search-result">
-// We split on data-asin boundaries (more resilient than s-search-result-only matching).
+// Amazon Egypt: target [data-component-type="s-search-result"] containers
+// + .a-price-whole for clean integer price (ignores decimals).
 async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
   try {
     const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&language=en_AE`
@@ -285,10 +301,10 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
 
-    // Strategy 1: split on data-asin (works regardless of wrapper class names)
+    // Primary strategy: split on data-component-type="s-search-result"
     let cards: string[] = []
-    const asinSplitRe = /<div[^>]+data-asin="[A-Z0-9]{10}"[^>]*>/g
-    const matches = [...html.matchAll(asinSplitRe)]
+    const searchResultRe = /<div[^>]+data-component-type="s-search-result"[^>]*>/g
+    const matches = [...html.matchAll(searchResultRe)]
     if (matches.length > 0) {
       for (let i = 0; i < matches.length; i++) {
         const start = matches[i].index!
@@ -296,27 +312,31 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
         cards.push(html.slice(start, end))
       }
     }
-    // Strategy 2 (fallback): old s-search-result splitting
+    // Fallback: split on data-asin
     if (cards.length === 0) {
-      const cardRe = /<div[^>]+data-component-type="s-search-result"[\s\S]*?(?=<div[^>]+data-component-type="s-search-result"|<div class="s-main-slot)/g
-      cards = html.match(cardRe) || []
+      const asinRe = /<div[^>]+data-asin="[A-Z0-9]{10}"[^>]*>/g
+      const asinMatches = [...html.matchAll(asinRe)]
+      for (let i = 0; i < asinMatches.length; i++) {
+        const start = asinMatches[i].index!
+        const end = i + 1 < asinMatches.length ? asinMatches[i + 1].index! : Math.min(start + 8000, html.length)
+        cards.push(html.slice(start, end))
+      }
     }
 
     for (const card of cards.slice(0, 20)) {
-      // Skip sponsored/ad slots that have no real price
       const titleMatch =
         card.match(/<h2[^>]*aria-label="([^"]+)"/) ||
         card.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/) ||
-        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/) ||
-        card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*s-line-clamp[^"]*"[^>]*>([\s\S]*?)<\/a>/)
+        card.match(/<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([\s\S]*?)<\/span>/)
       const linkMatch =
         card.match(/<a[^>]+class="[^"]*a-link-normal[^"]*"[^>]+href="(\/[^"]+\/dp\/[A-Z0-9]+[^"]*)"/) ||
         card.match(/<a[^>]+href="(\/[^"]+\/dp\/[A-Z0-9]+[^"]*)"/) ||
         card.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"/)
       const imgMatch = card.match(/<img[^>]+src="(https:\/\/m\.media-amazon\.com\/[^"]+)"/)
+      // PRICE: prefer .a-price-whole (integer part, no decimals), then .a-offscreen
       const priceMatch =
+        card.match(/<span[^>]*class="[^"]*a-price-whole[^"]*"[^>]*>([\d,]+)/) ||
         card.match(/<span class="a-offscreen">[^<]*?([\d,]+(?:\.\d+)?)/) ||
-        card.match(/<span class="a-price-whole">([\d,]+)/) ||
         card.match(/<span[^>]*class="[^"]*a-price[^"]*"[^>]*>[\s\S]*?<span[^>]*class="[^"]*a-offscreen[^"]*"[^>]*>[^\d]*([\d,]+(?:\.\d+)?)/)
       if (!titleMatch || !linkMatch || !priceMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://www.amazon.eg')
@@ -336,88 +356,10 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
   }
 }
 
-// ── Noon: native via __NEXT_DATA__ embedded JSON ──
-async function scrapeNoon(query: string): Promise<RawProduct[]> {
-  try {
-    const url = `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url, {
-      headers: { ...STEALTH_HEADERS, 'Referer': 'https://www.noon.com/' },
-    }, 10000)
-    if (!res.ok) { console.log(`[Noon native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
-    const items: Partial<RawProduct>[] = []
-
-    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
-    if (nextDataMatch) {
-      try {
-        const json = JSON.parse(nextDataMatch[1])
-        const hits =
-          json?.props?.pageProps?.catalog?.hits ||
-          json?.props?.pageProps?.searchHits ||
-          json?.props?.pageProps?.initialState?.catalog?.products ||
-          []
-        for (const h of hits.slice(0, 15)) {
-          const name = h.name || h.product_title || h.title
-          const sku = h.sku || h.product_id || h.nis_sku
-          const priceCandidates = [h.sale_price, h.price, h.offer_price].map(parsePrice).filter(Boolean) as number[]
-          const price = priceCandidates.length > 0 ? Math.min(...priceCandidates) : null
-          if (!name || !sku || !price) continue
-          const slug = (h.url || h.product_link || `${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}/${sku}/p`)
-          const absUrl = toAbsoluteUrl(`/egypt-en/${slug}`, 'https://www.noon.com')
-          if (!absUrl) continue
-          items.push({
-            name: String(name),
-            url: absUrl,
-            price,
-            image: h.image_key ? `https://f.nooncdn.com/p/${h.image_key}.jpg` : (h.image || ''),
-          })
-        }
-      } catch (e) {
-        console.log(`[Noon native] __NEXT_DATA__ parse failed:`, e instanceof Error ? e.message : e)
-      }
-    }
-    console.log(`[Noon native] ${items.length} raw items`)
-    return normalizeProducts(items, 'Noon')
-  } catch (err) {
-    console.error(`[Noon native] error:`, err instanceof Error ? err.message : err)
-    return []
-  }
-}
-
-// B.TECH: Magento/PWA — try the storefront search HTML
-async function scrapeBtech(query: string): Promise<RawProduct[]> {
-  try {
-    const url = `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url)
-    if (!res.ok) { console.log(`[B.TECH native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
-    const items: Partial<RawProduct>[] = []
-    const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
-    const blocks = html.match(itemRe) || []
-    for (const b of blocks.slice(0, 15)) {
-      const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
-      if (!linkMatch) continue
-      const absUrl = toAbsoluteUrl(linkMatch[1], 'https://btech.com')
-      if (!absUrl) continue
-      const lowestPrice = extractLowestPrice(b)
-      if (!lowestPrice) continue
-      items.push({
-        name: stripTags(linkMatch[2]),
-        url: absUrl,
-        price: lowestPrice,
-        image: imgMatch ? imgMatch[1] : '',
-      })
-    }
-    console.log(`[B.TECH native] ${items.length} raw items`)
-    return normalizeProducts(items, 'B.TECH')
-  } catch (err) {
-    console.error(`[B.TECH native] error:`, err instanceof Error ? err.message : err)
-    return []
-  }
-}
-
-// 2B Egypt: Magento search
+// 2B Egypt: Magento search.
+// CRITICAL FIX: extractLowestPrice now strips .old-price / <s> / <del> nodes
+// BEFORE collecting price candidates → the crossed-out original price is gone,
+// only the active discount survives, and Math.min picks the lowest.
 async function scrape2B(query: string): Promise<RawProduct[]> {
   try {
     const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(query)}`
@@ -433,7 +375,7 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
       if (!linkMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://2b.com.eg')
       if (!absUrl) continue
-      const lowestPrice = extractLowestPrice(b)
+      const lowestPrice = extractLowestPrice(b) // strips old-price first
       if (!lowestPrice) continue
       items.push({
         name: stripTags(linkMatch[2]),
@@ -450,217 +392,20 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
   }
 }
 
-// Helper: parse Shopify product card block (HTML fallback)
-function parseShopifyCardBlock(block: string, path: string, baseUrl: string): Partial<RawProduct> | null {
-  const titleMatch = block.match(/title="([^"]+)"/) || block.match(/alt="([^"]+)"/)
-  const imgMatch = block.match(/<img[^>]+src="([^"]+)"/) || block.match(/data-src="([^"]+)"/)
-  if (!titleMatch) return null
-  const absUrl = toAbsoluteUrl(path, baseUrl)
-  if (!absUrl) return null
-  const lowestPrice = extractLowestPrice(block)
-  if (!lowestPrice) return null
-  return { name: titleMatch[1], url: absUrl, price: lowestPrice, image: imgMatch ? imgMatch[1] : '' }
-}
-
-// Dream 2000: Shopify-like — try /search/suggest.json then HTML
-async function scrapeDream2000(query: string): Promise<RawProduct[]> {
-  return scrapeShopify(query, 'https://dream2000.com', 'Dream 2000')
-}
-
-// Select.eg: Shopify
-async function scrapeSelect(query: string): Promise<RawProduct[]> {
-  return scrapeShopify(query, 'https://select.eg', 'Select.eg')
-}
-
-// ── NATIVE SCRAPERS (Group 2) ──
-
-// Generic Magento scraper (used by RayaShop, Compumarts, etc.) — accepts <li> OR <div> product-item
-async function scrapeMagento(query: string, baseUrl: string, searchPath: string, storeName: string): Promise<RawProduct[]> {
-  try {
-    const url = `${baseUrl}${searchPath}${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
-    if (!res.ok) { console.log(`[${storeName} native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
-    const items: Partial<RawProduct>[] = []
-    // Match <li> OR <div> with product-item class
-    const itemRe = /<(?:li|div)[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/(?:li|div)>/g
-    let blocks = html.match(itemRe) || []
-    // Fallback: any block with product-item-link inside
-    if (blocks.length === 0) {
-      const altRe = /<[^>]+class="[^"]*\bproduct(?:-item)?\b[^"]*"[\s\S]{0,2000}?product-item-link[\s\S]{0,2000}?<\/[^>]+>/g
-      blocks = html.match(altRe) || []
-    }
-    for (const b of blocks.slice(0, 15)) {
-      const linkMatch =
-        b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
-        b.match(/<a[^>]+href="([^"]+)"[^>]*\bclass="[^"]*product-item-link[^"]*"[^>]*>([\s\S]*?)<\/a>/) ||
-        b.match(/<a[^>]+href="(\/[^"]+\.html)"[\s\S]{0,500}?title="([^"]+)"/)
-      const imgMatch = b.match(/<img[^>]+(?:data-src|src)="([^"]+)"/)
-      if (!linkMatch) continue
-      const absUrl = toAbsoluteUrl(linkMatch[1], baseUrl)
-      if (!absUrl) continue
-      const lowestPrice = extractLowestPrice(b)
-      if (!lowestPrice) continue
-      items.push({
-        name: stripTags(linkMatch[2]),
-        url: absUrl,
-        price: lowestPrice,
-        image: imgMatch ? imgMatch[1] : '',
-      })
-    }
-    console.log(`[${storeName} native] ${items.length} raw items`)
-    return normalizeProducts(items, storeName)
-  } catch (err) {
-    console.error(`[${storeName} native] error:`, err instanceof Error ? err.message : err)
-    return []
-  }
-}
-
-// Generic Shopify scraper using /search/suggest.json + HTML fallback
-async function scrapeShopify(query: string, baseUrl: string, storeName: string): Promise<RawProduct[]> {
-  try {
-    const jsonUrl = `${baseUrl}/search/suggest.json?q=${encodeURIComponent(query)}&resources[type]=product&resources[limit]=10`
-    const jsonRes = await fetchWithTimeout(jsonUrl, { headers: { 'Accept': 'application/json' } }, 10000)
-    if (jsonRes.ok) {
-      const data = await jsonRes.json().catch(() => null)
-      const products = data?.resources?.results?.products || []
-      if (products.length > 0) {
-        const items: Partial<RawProduct>[] = []
-        for (const p of products) {
-          const absUrl = toAbsoluteUrl(p.url || '', baseUrl)
-          if (!absUrl) continue
-          // Shopify suggest returns price as string (lowest variant); use Math.min if multiple price fields
-          const candidates: number[] = []
-          for (const k of ['price', 'price_min', 'compare_at_price_min']) {
-            const v = parsePrice(p[k]); if (v !== null && v > 0) candidates.push(v)
-          }
-          const finalPrice = candidates.length > 0 ? Math.min(...candidates) : null
-          if (finalPrice === null) continue
-          items.push({ name: p.title, url: absUrl, price: finalPrice, image: p.image || p.featured_image })
-        }
-        if (items.length > 0) {
-          console.log(`[${storeName} native] JSON ${items.length} items`)
-          return normalizeProducts(items, storeName)
-        }
-      }
-    }
-    // Fallback: HTML scrape
-    const htmlUrl = `${baseUrl}/search?q=${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(htmlUrl, {}, 10000)
-    if (!res.ok) { console.log(`[${storeName} native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
-    const items: Partial<RawProduct>[] = []
-    const cardRe = /<a[^>]+href="(\/products\/[^"]+)"[\s\S]{0,800}?<\/a>/g
-    const seen = new Set<string>()
-    let m: RegExpExecArray | null
-    while ((m = cardRe.exec(html)) !== null && items.length < 15) {
-      const path = m[1]
-      if (seen.has(path)) continue
-      seen.add(path)
-      const parsed = parseShopifyCardBlock(m[0], path, baseUrl)
-      if (parsed) items.push(parsed)
-    }
-    console.log(`[${storeName} native] HTML ${items.length} items`)
-    return normalizeProducts(items, storeName)
-  } catch (err) {
-    console.error(`[${storeName} native] error:`, err instanceof Error ? err.message : err)
-    return []
-  }
-}
-
-// RayaShop uses Hyvä theme — different DOM than classic Magento. Try Hyvä first, then generic Magento.
-// CRITICAL: Only accept canonical product URLs ending in .html and prepend https://www.rayashop.com.
-async function scrapeRayaShop(query: string): Promise<RawProduct[]> {
-  try {
-    const url = `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(query)}`
-    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
-    if (!res.ok) { console.log(`[RayaShop native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
-    const items: Partial<RawProduct>[] = []
-    const hyvaRe = /<div[^>]*class="[^"]*product-item-info[^"]*"[\s\S]*?(?=<div[^>]*class="[^"]*product-item-info|<\/(?:ol|ul|main))/g
-    let blocks = html.match(hyvaRe) || []
-    if (blocks.length === 0) {
-      const altRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
-      blocks = html.match(altRe) || []
-    }
-    const seenUrls = new Set<string>()
-    for (const b of blocks.slice(0, 15)) {
-      let canonicalHref: string | null = null
-      let nameFromAnchor = ''
-      const linkPatterns: RegExp[] = [
-        /<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/,
-        /<a[^>]+href="([^"]+\.html[^"]*)"[^>]*\bclass="[^"]*product-item-link[^"]*"[^>]*>([\s\S]*?)<\/a>/,
-        /<a[^>]+href="(https?:\/\/(?:www\.)?rayashop\.com\/[^"]+\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/,
-        /<a[^>]+href="(\/[^"]+\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/,
-      ]
-      for (const re of linkPatterns) {
-        const m = b.match(re)
-        if (m) { canonicalHref = m[1]; nameFromAnchor = stripTags(m[2] || ''); break }
-      }
-      if (!canonicalHref) continue
-      const lowerHref = canonicalHref.toLowerCase()
-      if (/add-?to-?cart|wishlist|compare|javascript:|checkout|customer|\/category\//.test(lowerHref)) continue
-      if (!/\.html(\?|$|#)/.test(lowerHref)) continue
-      let absUrl: string
-      try {
-        absUrl = canonicalHref.startsWith('http')
-          ? canonicalHref.replace(/^https?:\/\/(www\.)?rayashop\.com/, 'https://www.rayashop.com')
-          : `https://www.rayashop.com${canonicalHref.startsWith('/') ? '' : '/'}${canonicalHref}`
-      } catch { continue }
-      if (seenUrls.has(absUrl)) continue
-      seenUrls.add(absUrl)
-
-      // Single lowest price per card (Math.min over all detected candidates)
-      const lowestPrice = extractLowestPrice(b)
-      if (!lowestPrice) continue
-
-      let name = nameFromAnchor
-      if (!name) {
-        const titleM = b.match(/title="([^"]+)"/) || b.match(/<img[^>]+alt="([^"]+)"/)
-        name = titleM ? stripTags(titleM[1]) : ''
-      }
-      if (!name) continue
-
-      const imgMatch = b.match(/<img[^>]+(?:data-src|src)="([^"]+)"/)
-      items.push({ name, url: absUrl, price: lowestPrice, image: imgMatch ? imgMatch[1] : '' })
-    }
-    console.log(`[RayaShop native] ${items.length} raw items (${blocks.length} blocks)`)
-    return normalizeProducts(items, 'RayaShop')
-  } catch (err) {
-    console.error(`[RayaShop native] error:`, err instanceof Error ? err.message : err)
-    return []
-  }
-}
-
-const scrapeSelectEG  = (q: string) => scrapeShopify(q, 'https://select.eg', 'Select.eg')
-
-// ── 13 STORES (Golden Version) ──
-// Each native store also has a searchUrl, used as the Firecrawl fallback target if native returns 0 items OR exceeds the 12s race timeout.
+// ════════════════════════════════════════════════════════════════════
+// BIG 5 STORE CONFIG
+//   • Amazon Egypt, Jumia, 2B Egypt → native (12s race → Firecrawl fallback)
+//   • Noon, B.TECH                  → direct Firecrawl (heavy WAF/Cloudflare)
+// ════════════════════════════════════════════════════════════════════
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // ─── GENERAL (always searched, 9 stores) ───
-  'Amazon Egypt':      { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeAmazonEG },
-  // Noon → Firecrawl: Supabase edge IPs hit HTTP/2 reset + bot-detection on noon.com
-  'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'Jumia':             { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeJumia },
-  'RayaShop':          { searchUrl: q => `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
-  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrape2B },
-  'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
-  'Cairo Sales':       { searchUrl: q => `https://cairosales.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 1 },
-  'Select Egypt':      { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeSelectEG },
-
-  // ─── APPLE SPECIALISTS (only when query contains iPhone / Mac / iPad / AirPods, 4 stores) ───
-  // Tradeline → Firecrawl: Supabase edge IPs are blocked at TLS layer
-  'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // iShop: ishop.com.eg domain is dead (DNS NXDOMAIN). Use ishopegypt.com instead.
-  'iShop':             { searchUrl: q => `https://ishopegypt.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
-  'MyPlus':            { searchUrl: q => `https://myplus.com.eg/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
+  'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`,                       method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
+  'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,             method: 'native',    tier: 1, nativeScraper: scrapeJumia },
+  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,    method: 'native',    tier: 1, nativeScraper: scrape2B },
+  'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,         method: 'firecrawl', tier: 1 },
+  'B.TECH':       { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`,       method: 'firecrawl', tier: 1 },
 }
 
 // ── Scraper: Firecrawl ──
-// Long timeout is safe: each store is its own edge function call (Promise.allSettled
-// on the client), so a slow Firecrawl run for one store does not block the others.
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
@@ -689,10 +434,10 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
             },
             required: ['products'],
           },
-          prompt: `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products, no accessories.`,
+          prompt: `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock). For price, use the active selling price (ignore any crossed-out original price).`,
         },
         waitFor: 5000,
-        timeout: 75000, // Firecrawl-side timeout (ms). Default ~30s was too tight.
+        timeout: 75000,
       }),
     })
     const data = await response.json()
@@ -732,7 +477,6 @@ Deno.serve(async (req) => {
     const body = await req.json()
     const { query, store, force_refresh } = body
     // SECURITY: NEVER trust user_id from request body. Always verify via JWT.
-    // Any user_id in the body is ignored to prevent credit theft.
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
       return new Response(JSON.stringify({ success: false, error: 'Query is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
@@ -745,7 +489,7 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!
 
-    // ── SECURITY: Verify caller identity via JWT (optional — anonymous searches allowed, but credit ops require auth) ──
+    // ── SECURITY: Verify caller identity via JWT (anonymous searches allowed) ──
     let user_id: string | null = null
     const authHeader = req.headers.get('Authorization')
     if (authHeader?.startsWith('Bearer ')) {
@@ -782,9 +526,6 @@ Deno.serve(async (req) => {
     }
 
     // ── Scrape ──
-    // Credit logic:
-    //   - method='firecrawl': reserve 1 credit upfront, settle 1 if items returned else 0
-    //   - method='native': zero cost. If native returns 0 items, Safety Valve fires → reserve+charge 1 credit only when Firecrawl fallback returns items.
     const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
     let products: RawProduct[] = []
@@ -794,7 +535,7 @@ Deno.serve(async (req) => {
     try {
       if (config.method === 'native') {
         if (!config.nativeScraper) throw new Error('Native scraper not configured')
-        // 12-SECOND RULE: race the native scraper. If it stalls past 12s, fall back to Firecrawl.
+        // 12-SECOND RULE: race the native scraper. If stalls past 12s, fall back to Firecrawl.
         products = await raceWithTimeout(config.nativeScraper(trimmedQuery), NATIVE_RACE_TIMEOUT_MS, store)
 
         // ── Safety Valve: native returned 0 → silently fall back to Firecrawl ──
@@ -802,10 +543,7 @@ Deno.serve(async (req) => {
           console.log(`[${store}] Safety Valve triggered — native returned 0, trying Firecrawl fallback`)
           if (user_id) {
             txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-            // If user has no credits, just return 0 results silently — no error
-            if (!txId) {
-              console.log(`[${store}] Safety Valve skipped — no credits`)
-            }
+            if (!txId) console.log(`[${store}] Safety Valve skipped — no credits`)
           }
           if (!user_id || txId) {
             const fallback = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
@@ -817,7 +555,7 @@ Deno.serve(async (req) => {
           }
         }
       } else {
-        // method='firecrawl' — reserve credit upfront
+        // method='firecrawl' — reserve credit upfront (Noon, B.TECH)
         if (!firecrawlKey) throw new Error('Firecrawl not configured')
         if (user_id) {
           txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
@@ -834,7 +572,6 @@ Deno.serve(async (req) => {
     }
 
     // ── Settle credits ──
-    // Charge 1 only if (a) firecrawl method OR (b) native fallback recovered items.
     if (txId) {
       const charge = products.length > 0 ? 1 : 0
       await settleCredits(supabaseUrl, supabaseKey, txId, charge)
@@ -846,7 +583,7 @@ Deno.serve(async (req) => {
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
     if (products.length < beforeCount) console.log(`[${store}] Intent: ${beforeCount} -> ${products.length}`)
 
-    // ── UPSERT cache (self-cleaning, prevents DB bloat) ──
+    // ── UPSERT cache ──
     if (products.length > 0) {
       const writeClient = createClient(supabaseUrl, supabaseKey)
       const expiresAt = new Date(Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000).toISOString()
@@ -859,7 +596,6 @@ Deno.serve(async (req) => {
     console.log(`[${store}] Returning ${products.length} products`)
 
     // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
-    // Logging failures must NEVER crash the search response.
     try {
       const logClient = createClient(supabaseUrl, supabaseKey)
       logClient
