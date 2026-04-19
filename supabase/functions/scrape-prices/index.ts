@@ -378,14 +378,16 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
 // only the active discount survives, and Math.min picks the lowest.
 async function scrape2B(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(query)}`
+    // Append "smartphone" to disambiguate (avoid accessory-dominated organic ranking)
+    const mobileQuery = `${query} smartphone`
+    const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(mobileQuery)}`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
     const html = await res.text()
     const items: Partial<RawProduct>[] = []
     const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
     const blocks = html.match(itemRe) || []
-    for (const b of blocks.slice(0, 15)) {
+    for (const b of blocks.slice(0, 50)) {
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
       const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
       if (!linkMatch) continue
