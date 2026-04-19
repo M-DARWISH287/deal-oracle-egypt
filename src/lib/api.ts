@@ -17,6 +17,7 @@ export function getRelevantStores(_query: string): StoreName[] {
 export interface RawProduct {
   name: string; name_ar?: string; price: number;
   url: string; image?: string; specs?: string; store: string; isRefurbished?: boolean;
+  confidenceScore?: number;
 }
 
 export interface StoreOffer { store: string; price: number; url: string; currency: string; }
@@ -28,6 +29,7 @@ export interface Product {
   image: string; category: string;
   offers: StoreOffer[];
   isRefurbished?: boolean; isVariant?: boolean;
+  confidenceScore?: number;
 }
 
 export interface StoreSearchResult {
