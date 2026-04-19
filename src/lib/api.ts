@@ -208,7 +208,10 @@ export function clientFilterWithFallback(
 
     // GLOBAL RELEVANCE GATE — reject anything whose title doesn't match the query.
     const titleForRelevance = `${clone.name.en} ${clone.name.ar}`;
-    if (!validateRelevance(query, titleForRelevance)) continue;
+    const rel = validateRelevance(query, titleForRelevance);
+    if (!rel.isRelevant) continue;
+    // Take the higher of server-attached score vs client-recomputed score.
+    if (rel.score > (clone.confidenceScore ?? 0)) clone.confidenceScore = rel.score;
 
     // Strict brand matching: drop cross-brand pollution
     let brandMismatch = false;
