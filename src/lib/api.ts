@@ -1,45 +1,29 @@
 import { supabase } from '@/integrations/supabase/client';
 
-// ALL 17 STORES — 4 categories
+// ALL 13 STORES — Golden Version (2 categories)
 export const ALL_STORES = [
-  // GENERAL (always searched)
-  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', '2B Egypt', 'RayaShop',
-  // APPLE_ONLY
-  'Tradeline', 'iShop', 'Switch Plus',
-  // PC_HARDWARE
-  'Sigma', 'ElNekhely', 'Compumarts', 'Maximum Hardware',
-  // MOBILE_ONLY
-  'Dream 2000', 'Select.eg', 'Mobile Shop', 'Dubai Phone',
+  // GENERAL (always searched, 9 stores)
+  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', 'RayaShop', '2B Egypt',
+  'Dream 2000', 'Cairo Sales', 'Select Egypt',
+  // APPLE_ONLY (4 stores — only when query mentions iPhone / Mac / iPad / AirPods)
+  'Tradeline', 'Switch Plus', 'iShop', 'MyPlus',
 ] as const;
 
 export type StoreName = typeof ALL_STORES[number];
 
-// Category routing regexes
-const APPLE_RE = /iphone|mac|apple|ipad|airpods|watch|آيفون|ماك|ايربودز/i;
-const PC_RE = /laptop|pc|monitor|rtx|intel|amd|لاب|كمبيوتر|شاشة|gpu|ram|ssd|processor/i;
-const MOBILE_RE = /samsung|oppo|xiaomi|realme|هاتف|موبايل|vivo|huawei|honor|tecno|infinix/i;
+// Apple specialist trigger: iPhone, Mac, iPad, AirPods, Apple Watch
+const APPLE_RE = /iphone|mac\b|macbook|imac|apple|ipad|airpods|apple\s*watch|آيفون|ماك|آيباد|ايربودز/i;
 
-const GENERAL_STORES: StoreName[] = ['Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', '2B Egypt', 'RayaShop'];
-const APPLE_STORES: StoreName[] = ['Tradeline', 'iShop', 'Switch Plus'];
-const PC_STORES: StoreName[] = ['Sigma', 'ElNekhely', 'Compumarts', 'Maximum Hardware'];
-const MOBILE_STORES: StoreName[] = ['Dream 2000', 'Select.eg', 'Mobile Shop', 'Dubai Phone'];
+const GENERAL_STORES: StoreName[] = [
+  'Amazon Egypt', 'Noon', 'B.TECH', 'Jumia', 'RayaShop', '2B Egypt',
+  'Dream 2000', 'Cairo Sales', 'Select Egypt',
+];
+const APPLE_STORES: StoreName[] = ['Tradeline', 'Switch Plus', 'iShop', 'MyPlus'];
 
-/** Smart routing: only search stores relevant to the query */
+/** Smart routing: General stores always; Apple specialists only on Apple queries. */
 export function getRelevantStores(query: string): StoreName[] {
   const stores = new Set<StoreName>(GENERAL_STORES);
-  const isApple = APPLE_RE.test(query);
-  const isPC = PC_RE.test(query);
-  const isMobile = MOBILE_RE.test(query);
-
-  if (isApple) APPLE_STORES.forEach(s => stores.add(s));
-  if (isPC) PC_STORES.forEach(s => stores.add(s));
-  if (isMobile) MOBILE_STORES.forEach(s => stores.add(s));
-
-  // Fallback: if no specific category matched, add mobile stores
-  if (!isApple && !isPC && !isMobile) {
-    MOBILE_STORES.forEach(s => stores.add(s));
-  }
-
+  if (APPLE_RE.test(query)) APPLE_STORES.forEach(s => stores.add(s));
   return Array.from(stores);
 }
 
@@ -136,11 +120,13 @@ export async function searchStore(
 }
 
 const WHITELISTED_DOMAINS = [
+  // General
   'amazon.eg', 'noon.com', 'jumia.com.eg', 'btech.com',
-  '2b.com.eg', 'tradeline.com.eg', 'rfrsh.me', 'rayashop.com',
-  'select.eg', 'compumarts.com', 'elnekhely.com',
-  'sigma-computer.com', 'mobileshop.com.eg', 'dream2000.com',
-  'ishop.com.eg', 'switchplus.eg', 'maximumhardware.com', 'dubaiphone.eg',
+  '2b.com.eg', 'rayashop.com', 'dream2000.com', 'cairosales.com',
+  'select.eg',
+  // Apple specialists
+  'tradeline.com.eg', 'rfrsh.me', 'switchplus.eg',
+  'ishopegypt.com', 'myplus.com.eg',
 ];
 
 const BRAND_EXCLUSIONS: Record<string, string[]> = {

@@ -8,10 +8,24 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
+// THE 12-SECOND RULE: Native scrapers race against this internal timeout.
+// If they exceed it, we immediately fall back to Firecrawl extract mode.
+const NATIVE_RACE_TIMEOUT_MS = 12000
 // Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
 // runs in its own edge function invocation (client uses Promise.allSettled), so a
 // long timeout on one store does NOT block the others.
 const FIRECRAWL_TIMEOUT_MS = 90000
+
+// Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
+function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
+  return Promise.race([
+    p,
+    new Promise<T[]>((resolve) => setTimeout(() => {
+      console.log(`[${label}] Native exceeded ${timeoutMs}ms — bailing out`)
+      resolve([])
+    }, timeoutMs)),
+  ])
+}
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -109,6 +123,16 @@ function isAccessory(name: string): boolean {
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
 
+// Out-of-stock detector: drops items whose name/specs blob mentions unavailability.
+const OUT_OF_STOCK_KEYWORDS = [
+  'out of stock', 'sold out', 'unavailable', 'currently unavailable',
+  'نفدت الكمية', 'غير متوفر', 'نفذت الكمية', 'غير متاح',
+]
+function isOutOfStock(blob: string): boolean {
+  const lower = blob.toLowerCase()
+  return OUT_OF_STOCK_KEYWORDS.some(kw => lower.includes(kw))
+}
+
 function decodeHtml(s: string): string {
   return s
     .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'")
@@ -180,7 +204,13 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
 
 function normalizeProducts(items: Partial<RawProduct>[], storeName: string): RawProduct[] {
   return items
-    .filter(p => p.name && p.url && !isAccessory(String(p.name)))
+    .filter(p => {
+      if (!p.name || !p.url) return false
+      const blob = `${p.name} ${p.specs || ''}`
+      if (isAccessory(blob)) return false
+      if (isOutOfStock(blob)) return false
+      return true
+    })
     .slice(0, 5)
     .map(p => {
       const parsed = parsePrice(p.price as any)
@@ -602,38 +632,30 @@ async function scrapeRayaShop(query: string): Promise<RawProduct[]> {
   }
 }
 
-const scrapeCompumarts = (q: string) => scrapeMagento(q, 'https://compumarts.com', '/catalogsearch/result/?q=', 'Compumarts')
-const scrapeIShop     = (q: string) => scrapeShopify(q, 'https://ishop.com.eg', 'iShop')
 const scrapeSelectEG  = (q: string) => scrapeShopify(q, 'https://select.eg', 'Select.eg')
 
-// ── 17 STORES ──
-// Each native store also has a searchUrl, used as the Firecrawl fallback target if native returns 0 items.
+// ── 13 STORES (Golden Version) ──
+// Each native store also has a searchUrl, used as the Firecrawl fallback target if native returns 0 items OR exceeds the 12s race timeout.
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // GENERAL
+  // ─── GENERAL (always searched, 9 stores) ───
   'Amazon Egypt':      { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeAmazonEG },
-  // Noon → Firecrawl: Supabase edge IPs get HTTP/2 reset + DNS issues against noon.com
+  // Noon → Firecrawl: Supabase edge IPs hit HTTP/2 reset + bot-detection on noon.com
   'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'Jumia':             { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrape2B },
   'RayaShop':          { searchUrl: q => `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
-  // APPLE_ONLY
-  // Tradeline → Firecrawl: Supabase edge IPs get blocked at TLS layer
+  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrape2B },
+  'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'Cairo Sales':       { searchUrl: q => `https://cairosales.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 1 },
+  'Select Egypt':      { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeSelectEG },
+
+  // ─── APPLE SPECIALISTS (only when query contains iPhone / Mac / iPad / AirPods, 4 stores) ───
+  // Tradeline → Firecrawl: Supabase edge IPs are blocked at TLS layer
   'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // iShop → Firecrawl: ishop.com.eg domain is dead (DNS NXDOMAIN). Route via Firecrawl
-  // against the working ishopegypt.com domain instead.
-  'iShop':             { searchUrl: q => `https://ishopegypt.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // PC_HARDWARE
-  'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 2, nativeScraper: scrapeCompumarts },
-  'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // MOBILE_ONLY
-  'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Select.eg':         { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 3, nativeScraper: scrapeSelectEG },
-  'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  // iShop: ishop.com.eg domain is dead (DNS NXDOMAIN). Use ishopegypt.com instead.
+  'iShop':             { searchUrl: q => `https://ishopegypt.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
+  'MyPlus':            { searchUrl: q => `https://myplus.com.eg/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
 }
 
 // ── Scraper: Firecrawl ──
@@ -772,7 +794,8 @@ Deno.serve(async (req) => {
     try {
       if (config.method === 'native') {
         if (!config.nativeScraper) throw new Error('Native scraper not configured')
-        products = await config.nativeScraper(trimmedQuery)
+        // 12-SECOND RULE: race the native scraper. If it stalls past 12s, fall back to Firecrawl.
+        products = await raceWithTimeout(config.nativeScraper(trimmedQuery), NATIVE_RACE_TIMEOUT_MS, store)
 
         // ── Safety Valve: native returned 0 → silently fall back to Firecrawl ──
         if (products.length === 0 && firecrawlKey) {
