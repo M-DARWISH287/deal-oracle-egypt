@@ -592,17 +592,34 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
 }
 
 // ── Scraper: Firecrawl ──
-async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
+// Multi-stage SPA rendering: waitFor (initial paint) + scroll actions (trigger lazy-loaded
+// product grids) + post-scroll wait. On 0-result, retry with a longer wait + alternate
+// selector hint. waitFor alone is insufficient for React/Magento SPAs like B.TECH/Noon.
+async function callFirecrawlOnce(
+  storeName: string, query: string, searchUrl: string, firecrawlKey: string,
+  opts: { waitFor: number; alternate: boolean },
+): Promise<any[]> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+    // Multi-stage actions: wait for first paint → scroll twice → wait for lazy load.
+    const actions = [
+      { type: 'wait', milliseconds: opts.waitFor },
+      { type: 'scroll', direction: 'down' },
+      { type: 'wait', milliseconds: 1500 },
+      { type: 'scroll', direction: 'down' },
+      { type: 'wait', milliseconds: 1500 },
+    ]
+    const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
+    const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
+    const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${firecrawlKey}`, 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        url: searchUrl, formats: ['extract'],
-        extract: {
+        url: searchUrl,
+        formats: [{
+          type: 'json',
           schema: {
             type: 'object',
             properties: {
@@ -620,21 +637,42 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
             },
             required: ['products'],
           },
-          prompt: `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock). For price, use the active selling price (ignore any crossed-out original price).`,
-        },
-        waitFor: 5000,
+          prompt: opts.alternate ? promptAlt : promptBase,
+        }],
+        actions,
+        waitFor: opts.waitFor,
+        onlyMainContent: false, // SPA grids often live outside <main>
         timeout: 75000,
       }),
     })
     const data = await response.json()
-    if (!response.ok) { console.error(`[Firecrawl] ${storeName} error:`, data); return [] }
-    const products = data?.data?.extract?.products || data?.extract?.products || []
-    console.log(`[Firecrawl] ${storeName}: ${products.length} raw products`)
+    if (!response.ok) {
+      console.error(`[Firecrawl] ${storeName} HTTP ${response.status}:`, JSON.stringify(data).slice(0, 200))
+      return []
+    }
+    return data?.data?.json?.products || data?.json?.products
+        || data?.data?.extract?.products || data?.extract?.products || []
+  } finally { clearTimeout(timeout) }
+}
+
+async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
+  try {
+    // Stage 1: standard SPA render (5s wait + scroll).
+    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false })
+    console.log(`[Firecrawl] ${storeName}: stage-1 returned ${products.length} raw products`)
+
+    // Stage 2: 0 results → retry with extended wait + alternate selector prompt.
+    // Critical for B.TECH (heavy React hydration) and other SPAs.
+    if (products.length === 0) {
+      console.log(`[Firecrawl] ${storeName}: 0 results — retrying with extended wait + alternate selector strategy`)
+      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true })
+      console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
+    }
     return normalizeProducts(products, storeName, query)
   } catch (err) {
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
     return []
-  } finally { clearTimeout(timeout) }
+  }
 }
 
 // ── Credit helpers (stateless) ──
