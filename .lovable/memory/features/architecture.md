@@ -9,15 +9,16 @@ type: feature
 ## Stores
 Exactly 5: **Amazon Egypt, Jumia, 2B Egypt, Noon, B.TECH**. Every query hits all 5.
 
-## Scraping
-- **Native** (Amazon EG, Jumia, B.TECH): direct fetch wrapped in `raceWithTimeout(..., 12000)`. On 0-results or timeout → Firecrawl Safety Valve fallback.
-- **Firecrawl direct** (2B Egypt, Noon): Cloudflare/WAF/Magento markup churn forced full migration. 2B native scraper is permanently disabled.
-- Amazon EG: targets `[data-component-type="s-search-result"]`, strips Sponsored cards, `.a-price-whole` for clean integer price.
-- **Jumia PROGRESSIVE FALLBACK**: streams `<article class="prd">` nodes, applies per-node accessory + relevance check. After scanning 25 cards with 0 valid phones → returns [] → Safety Valve immediately routes to Firecrawl.
-- **B.TECH NEXT.JS SERVER ACTION** (no Firecrawl primary path): POST `https://btech.com/en` with header `Next-Action: 40a804c5...` (the `getProductsByFilterAction` reference lifted from public chunks) and body `[{search, page:'1', size:50}]`. Response is an RSC stream; we scan lines matching `^[0-9a-f]+:(\{...\})$` for the JSON containing `data.items[]`. Each item has `title / slug / main_image / price.final_float_price / categories_tree`. URL = `https://btech.com/en/{slug}`, image = `https://dwecxxryy5p59.cloudfront.net/{main_image}`. Sub-2s, no headless browser, no skeleton-loader noise. If action ID rotates after a B.TECH rebuild → 0 items → Safety Valve fires Firecrawl as backup.
+## 3-Stage Intelligent Retrieval (per store)
+- **Stage 1 — Primary native API** (3s aggressive timeout via `STAGE1_NATIVE_TIMEOUT_MS`): default UA + default params. Return immediately on success.
+- **Stage 2 — Smart retry** (3s, single attempt, ONLY on Stage 1 = 0 items): same scraper invoked with `stage=2` → rotated UA (`STEALTH_HEADERS_ALT`, Firefox/Linux) + modified params (B.TECH `page=2 size=30`, Jumia/Amazon `&page=2`). No identical retries.
+- **Stage 3 — Firecrawl multi-strategy** (only on Stages 1+2 = 0): Attempt 1 `waitFor=5000` no-scroll. Attempt 2 (on 0): `waitFor=9000` + scroll + alternate prompt.
 
-## Firecrawl strategies
-- **Noon, 2B Egypt + Safety Valve fallbacks**: multi-stage actions = wait → scroll → wait → scroll → wait. Stage-2 retry on 0-result with 9s wait + alt selector prompt.
+## Native scrapers
+- **Amazon EG** native: targets `[data-component-type="s-search-result"]`, strips Sponsored cards, `.a-price-whole`. Stage 2 drops the rh=node filter and uses page=2.
+- **Jumia** PROGRESSIVE FALLBACK: streams `<article class="prd">` nodes, applies per-node accessory + relevance check. After 25 cards with 0 valid phones → returns [] → Stage 2 / Stage 3.
+- **B.TECH** Next.js Server Action: POST `https://btech.com/en` with `Next-Action: 40a804c5...` header. Body `[{search, page, size}]`. Parses RSC stream lines `^[0-9a-f]+:(\{...\})$` for `data.items[]`. URL = `https://btech.com/en/{slug}`, image = `https://dwecxxryy5p59.cloudfront.net/{main_image}`.
+- **2B Egypt + Noon**: no native — direct Firecrawl Stage 3 only.
 
 ## Filtering
 - Out-of-stock + accessories dropped per-node.
