@@ -498,7 +498,7 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
       if (accepted.length >= 5) break
       // Early-fallback gate: meaningful batch processed, still empty → bail to fallback.
       if (scanned >= JUMIA_EARLY_FALLBACK_BATCH && accepted.length === 0) {
-        console.log(`[Jumia native] streamed ${scanned} cards with 0 valid phones — bailing for Firecrawl fallback`)
+        console.log(`[${tag}] streamed ${scanned} cards with 0 valid phones — bailing for Firecrawl fallback`)
         return []
       }
       if (++scanned > 200) break
