@@ -544,7 +544,7 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
       })
       .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
-    console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
+    console.error(`[${tag}] error:`, err instanceof Error ? err.message : err)
     return []
   }
 }
