@@ -474,12 +474,15 @@ async function scrapeBTech(query: string, stage: ScrapeStage = 1): Promise<RawPr
 // that always return 0 for high-end phones).
 const JUMIA_EARLY_FALLBACK_BATCH = 25
 
-async function scrapeJumia(query: string): Promise<RawProduct[]> {
+async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawProduct[]> {
+  const tag = `Jumia native stage-${stage}`
   try {
     const mobileQuery = `${query} smartphone`
-    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}`
-    const res = await fetchWithTimeout(url)
-    if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
+    const pageParam = stage === 2 ? '&page=2' : ''
+    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}${pageParam}`
+    const headers = stage === 2 ? STEALTH_HEADERS_ALT : undefined
+    const res = await fetchWithTimeout(url, headers ? { headers } : {})
+    if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     const html = await res.text()
 
     // ── STREAMING extraction with EARLY FALLBACK GATE ──
