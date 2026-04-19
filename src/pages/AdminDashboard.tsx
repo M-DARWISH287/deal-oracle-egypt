@@ -18,6 +18,30 @@ export default function AdminDashboard() {
   const [logs, setLogs] = useState<SearchLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownloadReport = async () => {
+    setDownloading(true);
+    try {
+      const url = `https://guynfpxitlwzndninzfo.supabase.co/functions/v1/generate-report`;
+      const res = await fetch(url, { method: 'GET' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      const objectUrl = URL.createObjectURL(blob);
+      a.href = objectUrl;
+      a.download = 'benchmark-report-last-10-days.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+      toast.success('Report downloaded');
+    } catch (e) {
+      toast.error(`Failed to generate report: ${String(e)}`);
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   useEffect(() => {
     async function load() {
