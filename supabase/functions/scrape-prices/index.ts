@@ -361,8 +361,12 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string, quer
 // ════════════════════════════════════════════════════════════════════
 
 // Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
-// MOBILE FOCUS: Jumia's bare search floods accessories. Append "smartphone" to disambiguate
-// AND scan up to 50 cards (defaults of 15 returned 0 phones in practice).
+// MOBILE FOCUS: Jumia's bare search floods accessories. Append "smartphone" to disambiguate.
+// PROGRESSIVE FALLBACK: stream up to ~25 cards. If zero valid phones surface in that
+// initial batch, signal an early Firecrawl fallback (prevents 200-card full-DOM walks
+// that always return 0 for high-end phones).
+const JUMIA_EARLY_FALLBACK_BATCH = 25
+
 async function scrapeJumia(query: string): Promise<RawProduct[]> {
   try {
     const mobileQuery = `${query} smartphone`
@@ -371,10 +375,10 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
     const html = await res.text()
 
-    // ── STREAMING extraction: parse one <article class="prd"> at a time, filter
-    // accessories + relevance per node, stop as soon as we have 5 valid products.
-    // Avoids materializing the full DOM and the slice-then-filter bug that dropped
-    // valid phones when the first 50 cards were accessory-heavy.
+    // ── STREAMING extraction with EARLY FALLBACK GATE ──
+    // Walk articles one at a time, filter per-node. After scanning the first
+    // JUMIA_EARLY_FALLBACK_BATCH cards, if zero valid phones found → bail with []
+    // so the Safety Valve immediately routes to Firecrawl (no full-DOM iteration).
     const articleRe = /<article[^>]*class="[^"]*\bprd\b[^"]*"[\s\S]*?<\/article>/g
     const accepted: Partial<RawProduct>[] = []
     const scores = new Map<string, number>()
@@ -382,7 +386,11 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
     let m: RegExpExecArray | null
     while ((m = articleRe.exec(html)) !== null) {
       if (accepted.length >= 5) break
-      // Hard cap to avoid pathological pages — but ONLY after streaming through them.
+      // Early-fallback gate: meaningful batch processed, still empty → bail to fallback.
+      if (scanned >= JUMIA_EARLY_FALLBACK_BATCH && accepted.length === 0) {
+        console.log(`[Jumia native] streamed ${scanned} cards with 0 valid phones — bailing for Firecrawl fallback`)
+        return []
+      }
       if (++scanned > 200) break
       const a = m[0]
       const hrefMatch =
