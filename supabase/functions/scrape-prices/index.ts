@@ -6,14 +6,14 @@ import { runBenchmark, type BenchmarkReport } from './benchmark.ts'
 // Fire-and-forget insert into regression_logs (service-role bypass; never blocks the response).
 function persistRegressionLog(
   supabaseUrl: string, supabaseKey: string,
-  store: string, latencyMs: number, b: BenchmarkReport,
+  store: string, stageUsed: string, latencyMs: number, b: BenchmarkReport,
 ) {
   try {
     const c = createClient(supabaseUrl, supabaseKey)
     c.from('regression_logs').insert({
       query: b.query,
       store,
-      stage_used: null,
+      stage_used: stageUsed,
       latency_ms: latencyMs,
       intent_accuracy: b.intent_accuracy,
       expansion_quality: b.expansion_quality,
