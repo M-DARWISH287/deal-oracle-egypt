@@ -58,7 +58,53 @@ const EARLY_EXIT_MIN_ITEMS = 5       // Part 9 — early exit threshold
 const EARLY_EXIT_MIN_RELEVANCE = 80  // Part 9 — early exit threshold
 
 // Stage label union (Part 1 — single source of truth).
+// 'UNKNOWN' is intentionally NOT in this union — every registered store MUST resolve
+// to one of these labels. Unknown stores are rejected at the handler level with HTTP 400.
 type StageUsed = 'API' | 'RETRY' | 'FIRECRAWL' | 'FAIL'
+
+// ── ARABIC → ENGLISH BRAND TOKEN MAP (deterministic pre-routing normalization) ──
+// Purpose: ensure Arabic queries hit native scraper URLs that index English brand tokens.
+// Rules: token-level replacement ONLY, numbers preserved, mixed AR/EN safe, URL-safe output.
+// We do NOT translate full sentences, do NOT touch model numbers, and do NOT remove
+// trailing variant words ("pro", "max", "ultra", "256") — they pass through unchanged.
+const AR_BRAND_MAP: Record<string, string> = {
+  'ايفون': 'iphone', 'آيفون': 'iphone', 'أيفون': 'iphone',
+  'ايباد': 'ipad', 'آيباد': 'ipad',
+  'ماكبوك': 'macbook', 'ماك بوك': 'macbook',
+  'ايربودز': 'airpods', 'إيربودز': 'airpods',
+  'سامسونج': 'samsung', 'سامسونغ': 'samsung',
+  'جالاكسي': 'galaxy', 'جلاكسي': 'galaxy',
+  'شاومي': 'xiaomi', 'ريدمي': 'redmi', 'بوكو': 'poco',
+  'اوبو': 'oppo', 'أوبو': 'oppo',
+  'هواوي': 'huawei', 'هونر': 'honor', 'ريلمي': 'realme',
+  'فيفو': 'vivo', 'نوكيا': 'nokia', 'سوني': 'sony',
+  'بلايستيشن': 'playstation', 'بلاي ستيشن': 'playstation',
+  'لينوفو': 'lenovo', 'ديل': 'dell',
+  'ابل': 'apple', 'آبل': 'apple', 'أبل': 'apple',
+  'برو': 'pro', 'ماكس': 'max', 'الترا': 'ultra', 'بلس': 'plus',
+  'ميني': 'mini', 'لايت': 'lite',
+}
+
+// Normalize a query for execution. Returns { execution, original }.
+//   - execution: Arabic brand tokens replaced with English equivalents; numbers preserved;
+//                Arabic-Indic digits → ASCII; safe to URL-encode.
+//   - original: the untouched user input, used ONLY for logs / telemetry.
+export function normalizeQuery(raw: string): { execution: string; original: string } {
+  const original = (raw || '').trim()
+  if (!original) return { execution: '', original }
+  // Arabic-Indic → ASCII digits (so "١٥" becomes "15" before URL encoding)
+  let s = original
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
+  // Multi-word phrases first (longest-first) so "ماك بوك" beats "بوك"
+  const entries = Object.entries(AR_BRAND_MAP).sort((a, b) => b[0].length - a[0].length)
+  for (const [ar, en] of entries) {
+    if (s.includes(ar)) s = s.split(ar).join(` ${en} `)
+  }
+  // Collapse whitespace, trim
+  const execution = s.replace(/\s+/g, ' ').trim()
+  return { execution, original }
+}
 
 // Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
 function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
