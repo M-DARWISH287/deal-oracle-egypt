@@ -376,7 +376,17 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
     const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
     const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
     if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
+    let html = await res.text()
+
+    // ── STRIP SPONSORED CONTENT before parsing ──
+    // Amazon's sponsored cards are noisy and often off-topic. Remove the labels and
+    // any AdHolder containers so they cannot contaminate the result set.
+    html = html
+      .replace(/<div[^>]*class="[^"]*\bAdHolder\b[^"]*"[\s\S]*?<\/div>/gi, ' ')
+      .replace(/<span[^>]*class="[^"]*\bpuis-sponsored-label-info\b[^"]*"[\s\S]*?<\/span>/gi, ' ')
+      .replace(/<span[^>]*class="[^"]*\bpuis-sponsored-label-text\b[^"]*"[\s\S]*?<\/span>/gi, ' ')
+      .replace(/<div[^>]+data-component-type="sp-sponsored-result"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/gi, ' ')
+
     const items: Partial<RawProduct>[] = []
 
     // Primary strategy: split on data-component-type="s-search-result"
@@ -402,6 +412,9 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
     }
 
     for (const card of cards.slice(0, 20)) {
+      // Per-card sponsored guard: skip any card that still mentions "Sponsored"
+      if (/\bSponsored\b/i.test(card) || /data-component-type="sp-sponsored-result"/i.test(card)) continue
+
       const titleMatch =
         card.match(/<h2[^>]*aria-label="([^"]+)"/) ||
         card.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/) ||
@@ -427,7 +440,7 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
       })
     }
     console.log(`[Amazon native] ${items.length} raw items, ${cards.length} cards`)
-    return normalizeProducts(items, 'Amazon Egypt')
+    return normalizeProducts(items, 'Amazon Egypt', query)
   } catch (err) {
     console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
     return []
