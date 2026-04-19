@@ -632,38 +632,30 @@ async function scrapeRayaShop(query: string): Promise<RawProduct[]> {
   }
 }
 
-const scrapeCompumarts = (q: string) => scrapeMagento(q, 'https://compumarts.com', '/catalogsearch/result/?q=', 'Compumarts')
-const scrapeIShop     = (q: string) => scrapeShopify(q, 'https://ishop.com.eg', 'iShop')
 const scrapeSelectEG  = (q: string) => scrapeShopify(q, 'https://select.eg', 'Select.eg')
 
-// ── 17 STORES ──
-// Each native store also has a searchUrl, used as the Firecrawl fallback target if native returns 0 items.
+// ── 13 STORES (Golden Version) ──
+// Each native store also has a searchUrl, used as the Firecrawl fallback target if native returns 0 items OR exceeds the 12s race timeout.
 const STORE_CONFIGS: Record<string, StoreConfig> = {
-  // GENERAL
+  // ─── GENERAL (always searched, 9 stores) ───
   'Amazon Egypt':      { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeAmazonEG },
-  // Noon → Firecrawl: Supabase edge IPs get HTTP/2 reset + DNS issues against noon.com
+  // Noon → Firecrawl: Supabase edge IPs hit HTTP/2 reset + bot-detection on noon.com
   'Noon':              { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'B.TECH':            { searchUrl: q => `https://btech.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
   'Jumia':             { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeJumia },
-  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrape2B },
   'RayaShop':          { searchUrl: q => `https://www.rayashop.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeRayaShop },
-  // APPLE_ONLY
-  // Tradeline → Firecrawl: Supabase edge IPs get blocked at TLS layer
+  '2B Egypt':          { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrape2B },
+  'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 1 },
+  'Cairo Sales':       { searchUrl: q => `https://cairosales.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 1 },
+  'Select Egypt':      { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 1, nativeScraper: scrapeSelectEG },
+
+  // ─── APPLE SPECIALISTS (only when query contains iPhone / Mac / iPad / AirPods, 4 stores) ───
+  // Tradeline → Firecrawl: Supabase edge IPs are blocked at TLS layer
   'Tradeline':         { searchUrl: q => `https://tradeline.com.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // iShop → Firecrawl: ishop.com.eg domain is dead (DNS NXDOMAIN). Route via Firecrawl
-  // against the working ishopegypt.com domain instead.
-  'iShop':             { searchUrl: q => `https://ishopegypt.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
   'Switch Plus':       { searchUrl: q => `https://switchplus.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // PC_HARDWARE
-  'Sigma':             { searchUrl: q => `https://sigma-computer.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'ElNekhely':         { searchUrl: q => `https://elnekhely.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  'Compumarts':        { searchUrl: q => `https://compumarts.com/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'native', tier: 2, nativeScraper: scrapeCompumarts },
-  'Maximum Hardware':  { searchUrl: q => `https://maximumhardware.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 2 },
-  // MOBILE_ONLY
-  'Dream 2000':        { searchUrl: q => `https://dream2000.com/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Select.eg':         { searchUrl: q => `https://select.eg/search?q=${encodeURIComponent(q)}`, method: 'native', tier: 3, nativeScraper: scrapeSelectEG },
-  'Mobile Shop':       { searchUrl: q => `https://mobileshop.com.eg/catalogsearch/result/?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
-  'Dubai Phone':       { searchUrl: q => `https://dubaiphone.eg/search?q=${encodeURIComponent(q)}`, method: 'firecrawl', tier: 3 },
+  // iShop: ishop.com.eg domain is dead (DNS NXDOMAIN). Use ishopegypt.com instead.
+  'iShop':             { searchUrl: q => `https://ishopegypt.com/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
+  'MyPlus':            { searchUrl: q => `https://myplus.com.eg/?s=${encodeURIComponent(q)}&post_type=product`, method: 'firecrawl', tier: 2 },
 }
 
 // ── Scraper: Firecrawl ──
