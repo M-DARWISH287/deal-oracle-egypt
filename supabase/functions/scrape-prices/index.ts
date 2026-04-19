@@ -362,7 +362,7 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
       })
     }
     console.log(`[Jumia native] ${items.length} raw items`)
-    return normalizeProducts(items, 'Jumia')
+    return normalizeProducts(items, 'Jumia', query)
   } catch (err) {
     console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
     return []
