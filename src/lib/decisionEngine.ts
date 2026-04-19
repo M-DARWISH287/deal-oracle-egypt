@@ -143,3 +143,66 @@ export function rankByBestValue(products: Product[]): DecisionEngineResult {
     },
   };
 }
+
+// ════════════════════════════════════════════════════════════════════
+// CHEAPEST-WINNER SELECTOR (Single Best Answer mode)
+// ────────────────────────────────────────────────────────────────────
+// Per product spec: pick ONE winning product = absolute lowest price
+// across all stores. Tiebreaker: higher relevance/confidence score.
+// Empty/failed stores are simply absent — they don't penalize anyone.
+// ════════════════════════════════════════════════════════════════════
+export interface CheapestWinnerResult {
+  bestProduct: Product | null;
+  cheapestOffer: StoreOffer | null;
+  priceComparison: StoreOffer[];   // all offers of the winning product, cheapest first
+  others: Product[];                // remaining products (for "More results")
+  pipelineTrace: {
+    rankingMethod: 'cheapest_wins';
+    totalProducts: number;
+    storesInWinner: string[];
+    winnerCheapestPrice: number | null;
+  };
+}
+
+export function pickCheapestWinner(products: Product[]): CheapestWinnerResult {
+  if (products.length === 0) {
+    return {
+      bestProduct: null,
+      cheapestOffer: null,
+      priceComparison: [],
+      others: [],
+      pipelineTrace: {
+        rankingMethod: 'cheapest_wins',
+        totalProducts: 0,
+        storesInWinner: [],
+        winnerCheapestPrice: null,
+      },
+    };
+  }
+
+  // For each product, the candidate price is its own cheapest offer.
+  // Then sort products by that price ASC, tiebreak by confidenceScore DESC.
+  const sorted = [...products].sort((a, b) => {
+    const pa = Math.min(...a.offers.map(o => o.price));
+    const pb = Math.min(...b.offers.map(o => o.price));
+    if (pa !== pb) return pa - pb;
+    return (b.confidenceScore ?? 0) - (a.confidenceScore ?? 0);
+  });
+
+  const winner = sorted[0];
+  const priceComparison = [...winner.offers].sort((a, b) => a.price - b.price);
+  const cheapestOffer = priceComparison[0];
+
+  return {
+    bestProduct: winner,
+    cheapestOffer,
+    priceComparison,
+    others: sorted.slice(1),
+    pipelineTrace: {
+      rankingMethod: 'cheapest_wins',
+      totalProducts: products.length,
+      storesInWinner: Array.from(new Set(priceComparison.map(o => o.store))),
+      winnerCheapestPrice: cheapestOffer?.price ?? null,
+    },
+  };
+}
