@@ -137,6 +137,63 @@ function isOutOfStock(blob: string): boolean {
   return OUT_OF_STOCK_KEYWORDS.some(kw => lower.includes(kw))
 }
 
+// ── GLOBAL RELEVANCE VALIDATOR ──
+// Generic, brand-agnostic, scalable. No hardcoded brand lists, no category assumptions.
+// Rules:
+//   1. Normalize: case-fold, strip diacritics, fold Arabic letter variants (أإآ→ا, ى→ي, ة→ه).
+//   2. Tokenize: split on whitespace + punctuation, drop tokens shorter than 2 chars.
+//   3. Numeric tokens MUST match exactly. Query "11" must NOT match title "15".
+//      Every numeric token in the query must appear verbatim in the title.
+//   4. Non-numeric tokens: require ≥60% overlap (rounded up). For 1-token queries,
+//      that single token must be present.
+function normalizeForRelevance(s: string): string {
+  if (!s) return ''
+  return s
+    .toLowerCase()
+    // Convert Arabic-Indic digits → ASCII so "١٥" matches "15"
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
+    .replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
+    // Strip Arabic diacritics (tashkeel) and tatweel
+    .replace(/[\u064B-\u0652\u0670\u0640]/g, '')
+    // Fold Arabic letter variants
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
+    .replace(/ة/g, 'ه')
+    // Strip Latin combining marks (NFD then remove diacritics)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function tokenizeForRelevance(s: string): string[] {
+  return normalizeForRelevance(s)
+    .split(/[^a-z0-9\u0600-\u06FF]+/)
+    .filter(t => t.length >= 2)
+}
+
+export function validateRelevance(query: string, title: string): boolean {
+  const qTokens = tokenizeForRelevance(query)
+  const tTokens = tokenizeForRelevance(title)
+  if (qTokens.length === 0 || tTokens.length === 0) return false
+
+  const tSet = new Set(tTokens)
+  const qNumbers = qTokens.filter(t => /^\d+$/.test(t))
+  const qWords = qTokens.filter(t => !/^\d+$/.test(t))
+
+  // Rule 3: every query number MUST appear verbatim. Strict numeric match.
+  for (const n of qNumbers) {
+    if (!tSet.has(n)) return false
+  }
+
+  // Rule 4: word overlap. Require ≥60% of query words to appear in title.
+  if (qWords.length === 0) return qNumbers.length > 0 // numbers-only query already validated
+  let hits = 0
+  for (const w of qWords) if (tSet.has(w)) hits++
+  const required = Math.max(1, Math.ceil(qWords.length * 0.6))
+  return hits >= required
+}
+
 function decodeHtml(s: string): string {
   return s
     .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'")
@@ -229,13 +286,18 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
   } finally { clearTimeout(timeout) }
 }
 
-function normalizeProducts(items: Partial<RawProduct>[], storeName: string): RawProduct[] {
+function normalizeProducts(items: Partial<RawProduct>[], storeName: string, query: string): RawProduct[] {
   return items
     .filter(p => {
       if (!p.name || !p.url) return false
       const blob = `${p.name} ${p.specs || ''}`
       if (isAccessory(blob)) return false
       if (isOutOfStock(blob)) return false
+      // GLOBAL RELEVANCE GATE — must pass to enter results.
+      if (!validateRelevance(query, String(p.name))) {
+        console.log(`[${storeName}] Relevance reject: "${String(p.name).slice(0, 80)}"`)
+        return false
+      }
       return true
     })
     .slice(0, 5)
@@ -300,7 +362,7 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
       })
     }
     console.log(`[Jumia native] ${items.length} raw items`)
-    return normalizeProducts(items, 'Jumia')
+    return normalizeProducts(items, 'Jumia', query)
   } catch (err) {
     console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
     return []
@@ -314,7 +376,17 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
     const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
     const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
     if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
-    const html = await res.text()
+    let html = await res.text()
+
+    // ── STRIP SPONSORED CONTENT before parsing ──
+    // Amazon's sponsored cards are noisy and often off-topic. Remove the labels and
+    // any AdHolder containers so they cannot contaminate the result set.
+    html = html
+      .replace(/<div[^>]*class="[^"]*\bAdHolder\b[^"]*"[\s\S]*?<\/div>/gi, ' ')
+      .replace(/<span[^>]*class="[^"]*\bpuis-sponsored-label-info\b[^"]*"[\s\S]*?<\/span>/gi, ' ')
+      .replace(/<span[^>]*class="[^"]*\bpuis-sponsored-label-text\b[^"]*"[\s\S]*?<\/span>/gi, ' ')
+      .replace(/<div[^>]+data-component-type="sp-sponsored-result"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/gi, ' ')
+
     const items: Partial<RawProduct>[] = []
 
     // Primary strategy: split on data-component-type="s-search-result"
@@ -340,6 +412,9 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
     }
 
     for (const card of cards.slice(0, 20)) {
+      // Per-card sponsored guard: skip any card that still mentions "Sponsored"
+      if (/\bSponsored\b/i.test(card) || /data-component-type="sp-sponsored-result"/i.test(card)) continue
+
       const titleMatch =
         card.match(/<h2[^>]*aria-label="([^"]+)"/) ||
         card.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/) ||
@@ -365,7 +440,7 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
       })
     }
     console.log(`[Amazon native] ${items.length} raw items, ${cards.length} cards`)
-    return normalizeProducts(items, 'Amazon Egypt')
+    return normalizeProducts(items, 'Amazon Egypt', query)
   } catch (err) {
     console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
     return []
@@ -403,7 +478,7 @@ async function scrape2B(query: string): Promise<RawProduct[]> {
       })
     }
     console.log(`[2B native] ${items.length} raw items`)
-    return normalizeProducts(items, '2B Egypt')
+    return normalizeProducts(items, '2B Egypt', query)
   } catch (err) {
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
     return []
@@ -470,7 +545,7 @@ async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: 
     if (!response.ok) { console.error(`[Firecrawl] ${storeName} error:`, data); return [] }
     const products = data?.data?.extract?.products || data?.extract?.products || []
     console.log(`[Firecrawl] ${storeName}: ${products.length} raw products`)
-    return normalizeProducts(products, storeName)
+    return normalizeProducts(products, storeName, query)
   } catch (err) {
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
     return []
