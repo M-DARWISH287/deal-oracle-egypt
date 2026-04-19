@@ -1058,64 +1058,48 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ── Scrape ──
+    // ── DETERMINISTIC 3-STAGE RETRIEVAL ──
+    const requestStart = Date.now()
     const config = STORE_CONFIGS[store]
     const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
-    let products: RawProduct[] = []
     let txId: string | null = null
-    let usedFallback = false
 
+    // Cache hit on cached result already returned above. Cache miss → enter pipeline.
+    let pipeline: PipelineResult
     try {
-      if (config.method === 'native') {
-        if (!config.nativeScraper) throw new Error('Native scraper not configured')
-        // ── 3-STAGE RETRIEVAL ──
-        // Stages 1 & 2: native scraper (3s each, Stage 2 = UA rotation + modified params).
-        products = await runNativeStages(config.nativeScraper, trimmedQuery, store)
-
-        // Stage 3: Firecrawl multi-strategy fallback (5s no-scroll → 9s + scroll + alt prompt).
-        if (products.length === 0 && firecrawlKey) {
-          console.log(`[${store}] Stage 3 (Firecrawl multi-strategy) — both native stages returned 0`)
-          if (user_id) {
-            txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-            if (!txId) console.log(`[${store}] Stage 3 skipped — no credits`)
-          }
-          if (!user_id || txId) {
-            const fallback = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
-            if (fallback.length > 0) {
-              products = fallback
-              usedFallback = true
-              console.log(`[${store}] Stage 3 recovered ${products.length} items via Firecrawl`)
-            }
-          }
-        }
-      } else {
-        // method='firecrawl' — reserve credit upfront (Noon, B.TECH)
-        if (!firecrawlKey) throw new Error('Firecrawl not configured')
-        if (user_id) {
+      pipeline = await runRetrievalPipeline(config, trimmedQuery, store, firecrawlKey, {
+        // Stage 3 only reserves a credit when actually invoked. For 'firecrawl'-method
+        // stores (Noon, 2B), Stages 1 & 2 are no-ops so the pipeline goes straight to S3.
+        reserveFirecrawlCredit: async () => {
+          if (!user_id) return true   // anonymous users always allowed
           txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-          if (!txId) {
-            return new Response(JSON.stringify({ success: false, error: 'Insufficient credits' }), { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
-          }
-        }
-        products = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
-      }
+          return !!txId
+        },
+      })
     } catch (scrapeErr) {
       if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
-      console.error(`[${store}] Scrape error:`, scrapeErr)
-      return new Response(JSON.stringify({ success: true, products: [], cached: false, store, error: String(scrapeErr) }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+      console.error(`[${store}] Pipeline error:`, scrapeErr)
+      return new Response(JSON.stringify({
+        success: true, products: [], cached: false, store,
+        stage_used: 'FAIL', attempts: 0, latency_ms: Date.now() - requestStart,
+        avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
+        error: String(scrapeErr),
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    // ── Settle credits ──
+    let products = pipeline.products
+    const usedFallback = pipeline.usedFallback
+
+    // ── Settle credits (Firecrawl only — native is free) ──
     if (txId) {
       const charge = products.length > 0 ? 1 : 0
       await settleCredits(supabaseUrl, supabaseKey, txId, charge)
     }
-    if (usedFallback) console.log(`[${store}] Used Firecrawl fallback (charged ${products.length > 0 ? 1 : 0} credit)`)
 
-    // Intent filter
+    // Intent filter (final defense — drops cross-brand pollution missed by relevance gate).
     const beforeCount = products.length
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
-    if (products.length < beforeCount) console.log(`[${store}] Intent: ${beforeCount} -> ${products.length}`)
+    if (products.length < beforeCount) console.log(`[${store}] Intent post-filter: ${beforeCount} -> ${products.length}`)
 
     // ── UPSERT cache ──
     if (products.length > 0) {
@@ -1127,7 +1111,21 @@ Deno.serve(async (req) => {
       )
     }
 
-    console.log(`[${store}] Returning ${products.length} products`)
+    const totalLatencyMs = Date.now() - requestStart
+
+    // ── Part 7: Structured metric log (single line, JSON, easy to grep + ship to BI) ──
+    console.log(JSON.stringify({
+      kind: 'scrape_metric',
+      store,
+      query: trimmedQuery,
+      stage_used: pipeline.stage_used,
+      attempts: pipeline.attempts,
+      latency_ms: totalLatencyMs,
+      items: products.length,
+      avg_relevance_score: pipeline.avgRelevance,
+      invalid_items_count: pipeline.invalidCount,
+      usedFallback,
+    }))
 
     // ── Server-side analytics (fire-and-forget, bypasses RLS via service role) ──
     try {
@@ -1142,7 +1140,19 @@ Deno.serve(async (req) => {
       console.warn(`[${store}] search_logs insert exception:`, logErr)
     }
 
-    return new Response(JSON.stringify({ success: true, products, cached: false, store, usedFallback }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+    // ── Part 6: Mandatory response contract ──
+    return new Response(JSON.stringify({
+      success: true,
+      products,
+      cached: false,
+      store,
+      usedFallback,
+      stage_used: pipeline.stage_used,
+      attempts: pipeline.attempts,
+      latency_ms: totalLatencyMs,
+      avg_relevance_score: pipeline.avgRelevance,
+      invalid_items_count: pipeline.invalidCount,
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     console.error('Error:', error)
     return new Response(JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
