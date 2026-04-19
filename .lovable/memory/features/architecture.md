@@ -1,6 +1,6 @@
 ---
 name: System architecture
-description: Big 5 store scraping pipeline — Amazon EG, Jumia (native + early Firecrawl fallback), 2B/Noon/B.TECH (Firecrawl)
+description: Big 5 store scraping pipeline — Amazon EG / Jumia / B.TECH native, 2B / Noon Firecrawl
 type: feature
 ---
 
@@ -10,14 +10,14 @@ type: feature
 Exactly 5: **Amazon Egypt, Jumia, 2B Egypt, Noon, B.TECH**. Every query hits all 5.
 
 ## Scraping
-- **Native** (Amazon EG, Jumia): direct fetch wrapped in `raceWithTimeout(..., 12000)`. On 0-results or timeout → Firecrawl Safety Valve fallback.
-- **Firecrawl direct** (2B Egypt, Noon, B.TECH): Cloudflare/WAF/Magento markup churn forced full migration. 2B native scraper is permanently disabled (kept defined but not wired into STORE_CONFIGS).
+- **Native** (Amazon EG, Jumia, B.TECH): direct fetch wrapped in `raceWithTimeout(..., 12000)`. On 0-results or timeout → Firecrawl Safety Valve fallback.
+- **Firecrawl direct** (2B Egypt, Noon): Cloudflare/WAF/Magento markup churn forced full migration. 2B native scraper is permanently disabled.
 - Amazon EG: targets `[data-component-type="s-search-result"]`, strips Sponsored cards, `.a-price-whole` for clean integer price.
-- **Jumia PROGRESSIVE FALLBACK**: streams `<article class="prd">` nodes, applies per-node accessory + relevance check. After scanning 25 cards with 0 valid phones → returns [] → Safety Valve immediately routes to Firecrawl. Avoids 200-card full-DOM walks.
+- **Jumia PROGRESSIVE FALLBACK**: streams `<article class="prd">` nodes, applies per-node accessory + relevance check. After scanning 25 cards with 0 valid phones → returns [] → Safety Valve immediately routes to Firecrawl.
+- **B.TECH NEXT.JS SERVER ACTION** (no Firecrawl primary path): POST `https://btech.com/en` with header `Next-Action: 40a804c5...` (the `getProductsByFilterAction` reference lifted from public chunks) and body `[{search, page:'1', size:50}]`. Response is an RSC stream; we scan lines matching `^[0-9a-f]+:(\{...\})$` for the JSON containing `data.items[]`. Each item has `title / slug / main_image / price.final_float_price / categories_tree`. URL = `https://btech.com/en/{slug}`, image = `https://dwecxxryy5p59.cloudfront.net/{main_image}`. Sub-2s, no headless browser, no skeleton-loader noise. If action ID rotates after a B.TECH rebuild → 0 items → Safety Valve fires Firecrawl as backup.
 
 ## Firecrawl strategies
-- **Default (Noon, 2B)**: multi-stage actions = wait → scroll → wait → scroll → wait. Stage-2 retry on 0-result with 9s wait + alt selector prompt.
-- **B.TECH SPECIAL**: NO scroll actions (caused skeleton-loader noise). Uses waitFor + selector wait (`.product-item, [data-product-id], .products-grid`). Prompt explicitly ignores skeleton/placeholder/shimmer cards. Stage-2 retry bumps waitFor to 7s and switches to an alt prompt that mines embedded JSON (`<script type="application/ld+json">`, `__INITIAL_STATE__`, `dataLayer`) when the visible grid is still empty.
+- **Noon, 2B Egypt + Safety Valve fallbacks**: multi-stage actions = wait → scroll → wait → scroll → wait. Stage-2 retry on 0-result with 9s wait + alt selector prompt.
 
 ## Filtering
 - Out-of-stock + accessories dropped per-node.

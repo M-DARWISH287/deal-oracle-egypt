@@ -356,9 +356,94 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string, quer
 }
 
 // ════════════════════════════════════════════════════════════════════
-// NATIVE SCRAPERS — BIG 5 ONLY (Amazon EG, Jumia, 2B Egypt)
-// Noon and B.TECH route directly to Firecrawl (heavy WAF/Cloudflare).
+// NATIVE SCRAPERS — BIG 5 (Amazon EG, Jumia, B.TECH via Server Action)
+// Only Noon and 2B Egypt route directly to Firecrawl (heavy WAF/Cloudflare).
 // ════════════════════════════════════════════════════════════════════
+
+// ── B.TECH: Next.js Server Action (no DOM scraping, no Firecrawl) ──
+// btech.com is a Next.js App Router site. Its product search is exposed as a
+// React Server Action that returns a clean JSON payload:
+//   POST https://btech.com/en
+//   Header: Next-Action: <action-id>
+//   Body:   [{"search":"<query>","page":"1","size":50}]
+// Response is an RSC stream where the line beginning with "1:" contains the
+// JSON {data:{items:[...]}}. We fetch this directly — no headless browser,
+// no Firecrawl, sub-2s latency, structured fields (title/price/slug/image).
+//
+// Action ID is hard-coded after being lifted from the publicly served chunks
+// (createServerReference("40a804c5...","getProductsByFilterAction")). If B.TECH
+// rebuilds and the ID rotates, this scraper returns [] and the Safety Valve
+// fires Firecrawl as a backup.
+const BTECH_ACTION_ID = '40a804c5a288e7f0b2b0feac959c350b1fff3a3678'
+const BTECH_CDN_BASE = 'https://dwecxxryy5p59.cloudfront.net/'
+
+interface BTechItem {
+  offering_id?: string
+  variant_id?: string
+  title?: string
+  slug?: string
+  brand?: string
+  main_image?: string
+  price?: { final?: string; base?: string; final_float_price?: string; currency?: string }
+  categories_tree?: string[]
+}
+
+async function scrapeBTech(query: string): Promise<RawProduct[]> {
+  // Server Actions accept a JSON body. We use { search, page, size:50 }.
+  const body = JSON.stringify([{ search: query, page: '1', size: 50 }])
+  let res: Response
+  try {
+    res = await fetchWithTimeout('https://btech.com/en', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'text/x-component',
+        'Next-Action': BTECH_ACTION_ID,
+        'Origin': 'https://btech.com',
+        'Referer': 'https://btech.com/en',
+        ...STEALTH_HEADERS,
+      },
+      body,
+    }, 10000)
+  } catch (err) {
+    console.error('[B.TECH] Server Action fetch failed:', err)
+    return []
+  }
+  if (!res.ok) { console.error(`[B.TECH] Server Action HTTP ${res.status}`); return [] }
+  const text = await res.text()
+
+  // RSC stream: lines like "<hex-id>:<json>". Find the line whose JSON contains
+  // .data.items — defensive scan in case Next.js changes the line ID on rebuild.
+  let payload: { data?: { items?: BTechItem[] } } | null = null
+  for (const ln of text.split('\n')) {
+    const m = ln.match(/^[0-9a-f]+:(\{.*\})$/)
+    if (!m) continue
+    try {
+      const parsed = JSON.parse(m[1])
+      if (parsed && parsed.data && Array.isArray(parsed.data.items)) { payload = parsed; break }
+    } catch { /* skip non-JSON RSC frames */ }
+  }
+  const items = payload?.data?.items || []
+  if (items.length === 0) { console.warn('[B.TECH] Server Action: 0 items in payload'); return [] }
+  console.log(`[B.TECH] Server Action: ${items.length} raw items`)
+
+  // Map to the shape normalizeProducts() expects, then run the shared accept
+  // gate (relevance + accessories + score + price floor; caps at 5 items).
+  const mapped: Partial<RawProduct>[] = items
+    .filter(it => it && it.title && it.slug && it.price)
+    .map(it => ({
+      name: String(it.title),
+      name_ar: String(it.title),
+      price: it.price?.final_float_price || it.price?.final || it.price?.base || '',
+      url: `https://btech.com/en/${it.slug}`,
+      image: it.main_image ? `${BTECH_CDN_BASE}${it.main_image}` : '',
+      specs: (it.categories_tree || []).join(' › '),
+      store: 'B.TECH',
+    }))
+
+  return normalizeProducts(mapped, 'B.TECH', query)
+}
+
 
 // Jumia: HTML with article.prd elements (current DOM uses <article class="prd _fb col c-prd">)
 // MOBILE FOCUS: Jumia's bare search floods accessories. Append "smartphone" to disambiguate.
@@ -595,16 +680,16 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // forced a full Firecrawl migration. All queries route directly to Firecrawl.
   '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
   'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'firecrawl', tier: 1 },
-  'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
+  // B.TECH: native via Next.js Server Action (sub-2s structured JSON, no Firecrawl).
+  // On 0 results (e.g. action ID rotated post-deploy), Safety Valve falls back to Firecrawl.
+  'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
 }
 
 // ── Scraper: Firecrawl ──
 // Default strategy: waitFor (initial paint) + scroll actions (trigger lazy-loaded
 // product grids) + post-scroll wait. On 0-result, retry with longer wait + alt prompt.
-//
-// B.TECH SPECIAL: scroll actions historically caused skeleton-loader noise + Firecrawl
-// timeouts. We now use networkIdle + adaptive waitFor (5–7s), NO scrolling, and a
-// hydrated-grid-only prompt that explicitly ignores skeleton loaders.
+// Used by Noon, 2B Egypt, and as Safety Valve fallback for native stores
+// (Amazon EG, Jumia, B.TECH) when their native scrapers return [].
 async function callFirecrawlOnce(
   storeName: string, query: string, searchUrl: string, firecrawlKey: string,
   opts: { waitFor: number; alternate: boolean },
@@ -612,32 +697,16 @@ async function callFirecrawlOnce(
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
-    const isBtech = storeName === 'B.TECH'
+    const actions = [
+      { type: 'wait', milliseconds: opts.waitFor },
+      { type: 'scroll', direction: 'down' },
+      { type: 'wait', milliseconds: 1500 },
+      { type: 'scroll', direction: 'down' },
+      { type: 'wait', milliseconds: 1500 },
+    ]
 
-    // B.TECH: networkIdle + waitFor only. No scrolls (they trigger skeleton re-renders).
-    // Others: standard multi-stage scroll to trigger lazy-loaded grids.
-    const actions = isBtech
-      ? [
-          { type: 'wait', milliseconds: opts.waitFor },
-          // networkIdle action signals "wait until XHR/fetch traffic stops" — far more
-          // reliable than blind scroll on a hydrated React SPA.
-          { type: 'wait', selector: '.product-item, [data-product-id], .products-grid' },
-        ]
-      : [
-          { type: 'wait', milliseconds: opts.waitFor },
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 1500 },
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 1500 },
-        ]
-
-    const promptBase = isBtech
-      ? `Extract top 5 HYDRATED product listings from this B.TECH search page for "${query}". STRICTLY ignore skeleton loaders, placeholder/shimmer cards, "loading…" states, and any element without a real product name + price. Only include cards from the main product grid (.product-item or .products-grid > li) with a fully resolved price (not "—" or empty). Use the active selling price (ignore crossed-out original price).`
-      : `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
-
-    const promptAlt = isBtech
-      ? `${promptBase} If the visible DOM grid has no fully-loaded products, look at the embedded JSON data inside <script type="application/ld+json"> or window.__INITIAL_STATE__ / window.dataLayer for product objects with name + price + url, and extract from there.`
-      : `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
+    const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
+    const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
 
     const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
       method: 'POST',
@@ -645,8 +714,6 @@ async function callFirecrawlOnce(
       signal: controller.signal,
       body: JSON.stringify({
         url: searchUrl,
-        // For B.TECH alt-stage, also request rawHtml so the LLM can mine embedded
-        // JSON / dataLayer (network-loaded product data) when the visible grid is empty.
         formats: [{
           type: 'json',
           schema: {
@@ -670,7 +737,7 @@ async function callFirecrawlOnce(
         }],
         actions,
         waitFor: opts.waitFor,
-        onlyMainContent: false, // SPA grids often live outside <main>
+        onlyMainContent: false,
         timeout: 75000,
       }),
     })
@@ -686,19 +753,13 @@ async function callFirecrawlOnce(
 
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   try {
-    const isBtech = storeName === 'B.TECH'
-    // B.TECH: start with 5s adaptive wait (no scroll). Others: 5s + scroll multi-stage.
     let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false })
     console.log(`[Firecrawl] ${storeName}: stage-1 returned ${products.length} raw products`)
 
-    // Stage 2: 0 results → retry.
-    //   • B.TECH: bump waitFor to 7s (adaptive cap) + alt prompt that mines embedded
-    //     JSON / dataLayer when the visual grid is empty.
-    //   • Others: 9s + alternate selector prompt.
+    // Stage 2 retry on 0 results: 9s wait + alternate selector prompt.
     if (products.length === 0) {
-      const stage2Wait = isBtech ? 7000 : 9000
-      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=${stage2Wait}ms, alternate prompt)`)
-      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: stage2Wait, alternate: true })
+      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=9000ms, alternate prompt)`)
+      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true })
       console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
     }
     return normalizeProducts(products, storeName, query)
