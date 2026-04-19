@@ -809,7 +809,31 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // B.TECH: native via Next.js Server Action (sub-2s structured JSON, no Firecrawl).
   // On 0 results (e.g. action ID rotated post-deploy), Safety Valve falls back to Firecrawl.
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
+  // NOTE: Carrefour is NOT registered. Per MVP decision, only the Big-5 above are wired.
+  // Any request for an unregistered store is rejected at the handler with HTTP 400 — no
+  // store may ever resolve to stage_used="UNKNOWN" or a missing handler.
 }
+
+// ── REGISTRY VALIDATION (runs once at module load) ──
+// Guarantees: every registered store has a searchUrl, a valid method, and — when method
+// is 'native' — a defined nativeScraper handler. Throws on misconfiguration so a broken
+// deploy fails loudly instead of silently returning UNKNOWN/empty results in production.
+;(function validateStoreRegistry() {
+  const errors: string[] = []
+  for (const [name, cfg] of Object.entries(STORE_CONFIGS)) {
+    if (typeof cfg.searchUrl !== 'function') errors.push(`${name}: missing searchUrl()`)
+    if (cfg.method !== 'native' && cfg.method !== 'firecrawl') errors.push(`${name}: invalid method "${cfg.method}"`)
+    if (cfg.method === 'native' && typeof cfg.nativeScraper !== 'function') {
+      errors.push(`${name}: method=native but nativeScraper handler is missing`)
+    }
+  }
+  if (errors.length > 0) {
+    const msg = `[STORE_REGISTRY] CRITICAL — invalid store configuration:\n  - ${errors.join('\n  - ')}`
+    console.error(msg)
+    throw new Error(msg)
+  }
+  console.log(`[STORE_REGISTRY] OK — ${Object.keys(STORE_CONFIGS).length} stores wired: ${Object.keys(STORE_CONFIGS).join(', ')}`)
+})()
 
 // ── Scraper: Firecrawl (Stage 3 multi-strategy fallback) ──
 // Attempt 1 (stage 1): waitFor=5000, NO scroll — fastest path, works for static SSR pages.
