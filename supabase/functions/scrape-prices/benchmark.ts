@@ -141,12 +141,19 @@ function scoreExpansionQuality(input: BenchmarkInput): { score: number; issues: 
     issues.push('full canonical query missing from expansions')
   }
 
-  // (b) No variant loss: every expansion containing the family/num MUST also contain the variant.
+  // (b) No variant loss: every expansion containing the family/num MUST also contain the variant
+  // (in EITHER its English OR Arabic form, since canonical AR/EN expansions are equivalent).
   if (variant) {
+    const variantAr: Record<string, string> = {
+      'pro max': 'برو ماكس', ultra: 'الترا', plus: 'بلس', pro: 'برو',
+      mini: 'ميني', lite: 'لايت', fe: 'fe',
+    }
+    const arForm = variantAr[variant]
     const reductive = expanded_queries.find(q => {
       const lq = q.toLowerCase()
       const looksLikeProductQuery = (family && lq.includes(family)) || (num && lq.includes(num))
-      return looksLikeProductQuery && !lq.includes(variant)
+      const hasVariantToken = lq.includes(variant) || (arForm ? lq.includes(arForm) : false)
+      return looksLikeProductQuery && !hasVariantToken
     })
     if (!reductive) { s += 30; strengths.push(`variant "${variant}" preserved across expansions`) }
     else issues.push(`reductive expansion "${reductive}" drops variant`)
