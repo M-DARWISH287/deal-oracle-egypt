@@ -625,7 +625,7 @@ async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<Ra
         image: imgMatch ? imgMatch[1] : '',
       })
     }
-    console.log(`[Amazon native] ${items.length} raw items, ${cards.length} cards`)
+    console.log(`[${tag}] ${items.length} raw items, ${cards.length} cards`)
     return normalizeProducts(items, 'Amazon Egypt', query)
   } catch (err) {
     console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
