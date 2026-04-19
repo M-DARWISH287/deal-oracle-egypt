@@ -313,21 +313,23 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
 }
 
 function normalizeProducts(items: Partial<RawProduct>[], storeName: string, query: string): RawProduct[] {
-  return items
-    .filter(p => {
-      if (!p.name || !p.url) return false
-      const blob = `${p.name} ${p.specs || ''}`
-      if (isAccessory(blob)) return false
-      if (isOutOfStock(blob)) return false
-      // GLOBAL RELEVANCE GATE — must pass to enter results.
-      if (!validateRelevance(query, String(p.name))) {
-        console.log(`[${storeName}] Relevance reject: "${String(p.name).slice(0, 80)}"`)
-        return false
-      }
-      return true
-    })
+  const scored: Array<{ item: Partial<RawProduct>; score: number }> = []
+  for (const p of items) {
+    if (!p.name || !p.url) continue
+    const blob = `${p.name} ${p.specs || ''}`
+    if (isAccessory(blob)) continue
+    if (isOutOfStock(blob)) continue
+    // GLOBAL RELEVANCE GATE — must pass to enter results.
+    const rel = validateRelevance(query, String(p.name))
+    if (!rel.isRelevant) {
+      console.log(`[${storeName}] Relevance reject: "${String(p.name).slice(0, 80)}"`)
+      continue
+    }
+    scored.push({ item: p, score: rel.score })
+  }
+  return scored
     .slice(0, 5)
-    .map(p => {
+    .map(({ item: p, score }) => {
       const parsed = parsePrice(p.price as any)
       return {
         name: String(p.name),
@@ -338,9 +340,10 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string, quer
         specs: p.specs || '',
         store: storeName,
         isRefurbished: checkRefurbished(String(p.name)),
+        confidenceScore: score,
       }
     })
-    .filter(p => p.price >= MINIMUM_PRICE_THRESHOLD)
+    .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
 }
 
 // ════════════════════════════════════════════════════════════════════
