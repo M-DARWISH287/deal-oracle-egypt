@@ -10,9 +10,12 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 3
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
-// THE 12-SECOND RULE: native scrapers race against this internal timeout.
-// If exceeded, we immediately fall back to Firecrawl extract mode.
-const NATIVE_RACE_TIMEOUT_MS = 12000
+// ── 3-STAGE INTELLIGENT RETRIEVAL ──
+// Stage 1 (Primary native API): aggressive 3s timeout — fail fast.
+// Stage 2 (Smart retry): same scraper with rotated UA + modified params, 3s timeout.
+// Stage 3 (Firecrawl multi-strategy fallback): waitFor=5s no-scroll → waitFor=9s + scroll + alt prompt.
+const STAGE1_NATIVE_TIMEOUT_MS = 3000
+const STAGE2_NATIVE_TIMEOUT_MS = 3000
 // Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
 // runs in its own edge function invocation (client uses Promise.allSettled), so a
 // long timeout on one store does NOT block the others.
@@ -29,7 +32,27 @@ function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): 
   ])
 }
 
+// 3-STAGE RETRIEVAL — Stages 1 + 2 native (no blind retries):
+// Stage 1: primary native scraper (default params, 3s aggressive timeout).
+// Stage 2: same scraper with stage=2 (rotated UA + modified params: page=2 / size=30),
+//          ONLY if Stage 1 returned 0 items. Single retry, never identical to Stage 1.
+async function runNativeStages(
+  scraper: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>,
+  query: string,
+  store: string,
+): Promise<RawProduct[]> {
+  const stage1 = await raceWithTimeout(scraper(query, 1), STAGE1_NATIVE_TIMEOUT_MS, `${store} S1`)
+  if (stage1.length > 0) return stage1
+  console.log(`[${store}] Stage 1 returned 0 — running Stage 2 (UA rotation + modified params)`)
+  const stage2 = await raceWithTimeout(scraper(query, 2), STAGE2_NATIVE_TIMEOUT_MS, `${store} S2`)
+  if (stage2.length > 0) console.log(`[${store}] Stage 2 recovered ${stage2.length} items`)
+  return stage2
+}
+
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+// Stage-2 alternate UA (Firefox/Linux) — different fingerprint from STEALTH_HEADERS Safari/macOS UA.
+const USER_AGENT_ALT = 'Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0'
 
 // Stealth headers used for Amazon / anti-bot stores
 const STEALTH_HEADERS: Record<string, string> = {
@@ -46,6 +69,17 @@ const STEALTH_HEADERS: Record<string, string> = {
   'Upgrade-Insecure-Requests': '1',
 }
 
+// Stage-2 alternate header set: Firefox/Linux UA + en-GB locale + no Sec-Fetch-* hints
+// (different request fingerprint to dodge UA-based rate limits / soft blocks).
+const STEALTH_HEADERS_ALT: Record<string, string> = {
+  'User-Agent': USER_AGENT_ALT,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-GB,en;q=0.5',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'DNT': '1',
+  'Upgrade-Insecure-Requests': '1',
+}
+
 // ── Types ──
 interface RawProduct {
   name: string; name_ar?: string; price: number | string;
@@ -55,11 +89,14 @@ interface RawProduct {
 
 type ScrapeMethod = 'native' | 'firecrawl'
 
+type ScrapeStage = 1 | 2;
 interface StoreConfig {
   searchUrl: (q: string) => string;
   method: ScrapeMethod;
   tier: 1 | 2 | 3;
-  nativeScraper?: (q: string) => Promise<RawProduct[]>;
+  // Native scraper accepts an optional stage flag: stage=2 enables UA rotation +
+  // modified request params (different page/size). See 3-stage retrieval algorithm.
+  nativeScraper?: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>;
 }
 
 // ── Helpers ──
@@ -388,9 +425,11 @@ interface BTechItem {
   categories_tree?: string[]
 }
 
-async function scrapeBTech(query: string): Promise<RawProduct[]> {
-  // Server Actions accept a JSON body. We use { search, page, size:50 }.
-  const body = JSON.stringify([{ search: query, page: '1', size: 50 }])
+async function scrapeBTech(query: string, stage: ScrapeStage = 1): Promise<RawProduct[]> {
+  // Stage 1: page=1, size=50, Safari UA. Stage 2: page=2, size=30, Firefox UA.
+  const isStage2 = stage === 2
+  const body = JSON.stringify([{ search: query, page: isStage2 ? '2' : '1', size: isStage2 ? 30 : 50 }])
+  const tag = `B.TECH stage-${stage}`
   let res: Response
   try {
     res = await fetchWithTimeout('https://btech.com/en', {
@@ -401,15 +440,15 @@ async function scrapeBTech(query: string): Promise<RawProduct[]> {
         'Next-Action': BTECH_ACTION_ID,
         'Origin': 'https://btech.com',
         'Referer': 'https://btech.com/en',
-        ...STEALTH_HEADERS,
+        ...(isStage2 ? STEALTH_HEADERS_ALT : STEALTH_HEADERS),
       },
       body,
     }, 10000)
   } catch (err) {
-    console.error('[B.TECH] Server Action fetch failed:', err)
+    console.error(`[${tag}] Server Action fetch failed:`, err)
     return []
   }
-  if (!res.ok) { console.error(`[B.TECH] Server Action HTTP ${res.status}`); return [] }
+  if (!res.ok) { console.error(`[${tag}] Server Action HTTP ${res.status}`); return [] }
   const text = await res.text()
 
   // RSC stream: lines like "<hex-id>:<json>". Find the line whose JSON contains
@@ -424,8 +463,8 @@ async function scrapeBTech(query: string): Promise<RawProduct[]> {
     } catch { /* skip non-JSON RSC frames */ }
   }
   const items = payload?.data?.items || []
-  if (items.length === 0) { console.warn('[B.TECH] Server Action: 0 items in payload'); return [] }
-  console.log(`[B.TECH] Server Action: ${items.length} raw items`)
+  if (items.length === 0) { console.warn(`[${tag}] Server Action: 0 items in payload`); return [] }
+  console.log(`[${tag}] Server Action: ${items.length} raw items`)
 
   // Map to the shape normalizeProducts() expects, then run the shared accept
   // gate (relevance + accessories + score + price floor; caps at 5 items).
@@ -452,12 +491,15 @@ async function scrapeBTech(query: string): Promise<RawProduct[]> {
 // that always return 0 for high-end phones).
 const JUMIA_EARLY_FALLBACK_BATCH = 25
 
-async function scrapeJumia(query: string): Promise<RawProduct[]> {
+async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawProduct[]> {
+  const tag = `Jumia native stage-${stage}`
   try {
     const mobileQuery = `${query} smartphone`
-    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}`
-    const res = await fetchWithTimeout(url)
-    if (!res.ok) { console.log(`[Jumia native] HTTP ${res.status}`); return [] }
+    const pageParam = stage === 2 ? '&page=2' : ''
+    const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}${pageParam}`
+    const headers = stage === 2 ? STEALTH_HEADERS_ALT : undefined
+    const res = await fetchWithTimeout(url, headers ? { headers } : {})
+    if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     const html = await res.text()
 
     // ── STREAMING extraction with EARLY FALLBACK GATE ──
@@ -473,7 +515,7 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
       if (accepted.length >= 5) break
       // Early-fallback gate: meaningful batch processed, still empty → bail to fallback.
       if (scanned >= JUMIA_EARLY_FALLBACK_BATCH && accepted.length === 0) {
-        console.log(`[Jumia native] streamed ${scanned} cards with 0 valid phones — bailing for Firecrawl fallback`)
+        console.log(`[${tag}] streamed ${scanned} cards with 0 valid phones — bailing for Firecrawl fallback`)
         return []
       }
       if (++scanned > 200) break
@@ -505,7 +547,7 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
       accepted.push({ name, url: absUrl, price: priceStr, image: imgMatch ? imgMatch[1] : '' })
       scores.set(absUrl, score)
     }
-    console.log(`[Jumia native] streamed ${scanned} cards, accepted ${accepted.length}`)
+    console.log(`[${tag}] streamed ${scanned} cards, accepted ${accepted.length}`)
     // Pre-validated → bypass relevance double-check, but still apply price floor.
     return accepted
       .map(p => {
@@ -519,18 +561,24 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
       })
       .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
-    console.error(`[Jumia native] error:`, err instanceof Error ? err.message : err)
+    console.error(`[${tag}] error:`, err instanceof Error ? err.message : err)
     return []
   }
 }
 
 // Amazon Egypt: target [data-component-type="s-search-result"] containers
 // + .a-price-whole for clean integer price (ignores decimals).
-async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
+async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<RawProduct[]> {
+  const tag = `Amazon native stage-${stage}`
   try {
-    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
-    const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
-    if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
+    // Stage 2: drop the strict node filter (rh=...) + use page=2 + alt UA — different
+    // request shape can dodge UA-rate-limit / soft-block on the same query.
+    const baseUrl = stage === 2
+      ? `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&page=2&language=en_AE`
+      : `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
+    const headers = stage === 2 ? STEALTH_HEADERS_ALT : STEALTH_HEADERS
+    const res = await fetchWithTimeout(baseUrl, { headers }, 10000)
+    if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     let html = await res.text()
 
     // ── STRIP SPONSORED CONTENT before parsing ──
@@ -594,10 +642,10 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
         image: imgMatch ? imgMatch[1] : '',
       })
     }
-    console.log(`[Amazon native] ${items.length} raw items, ${cards.length} cards`)
+    console.log(`[${tag}] ${items.length} raw items, ${cards.length} cards`)
     return normalizeProducts(items, 'Amazon Egypt', query)
   } catch (err) {
-    console.error(`[Amazon native] error:`, err instanceof Error ? err.message : err)
+    console.error(`[${tag}] error:`, err instanceof Error ? err.message : err)
     return []
   }
 }
@@ -685,25 +733,26 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
 }
 
-// ── Scraper: Firecrawl ──
-// Default strategy: waitFor (initial paint) + scroll actions (trigger lazy-loaded
-// product grids) + post-scroll wait. On 0-result, retry with longer wait + alt prompt.
-// Used by Noon, 2B Egypt, and as Safety Valve fallback for native stores
-// (Amazon EG, Jumia, B.TECH) when their native scrapers return [].
+// ── Scraper: Firecrawl (Stage 3 multi-strategy fallback) ──
+// Attempt 1 (stage 1): waitFor=5000, NO scroll — fastest path, works for static SSR pages.
+// Attempt 2 (stage 2): waitFor=9000 + scroll actions + alternative selector prompt — for
+// lazy-loaded SPA grids that need user interaction to hydrate.
 async function callFirecrawlOnce(
   storeName: string, query: string, searchUrl: string, firecrawlKey: string,
-  opts: { waitFor: number; alternate: boolean },
+  opts: { waitFor: number; alternate: boolean; scroll: boolean },
 ): Promise<any[]> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
   try {
-    const actions = [
-      { type: 'wait', milliseconds: opts.waitFor },
-      { type: 'scroll', direction: 'down' },
-      { type: 'wait', milliseconds: 1500 },
-      { type: 'scroll', direction: 'down' },
-      { type: 'wait', milliseconds: 1500 },
-    ]
+    const actions = opts.scroll
+      ? [
+          { type: 'wait', milliseconds: opts.waitFor },
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 1500 },
+          { type: 'scroll', direction: 'down' },
+          { type: 'wait', milliseconds: 1500 },
+        ]
+      : [{ type: 'wait', milliseconds: opts.waitFor }]
 
     const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
     const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
@@ -753,13 +802,13 @@ async function callFirecrawlOnce(
 
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   try {
-    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false })
-    console.log(`[Firecrawl] ${storeName}: stage-1 returned ${products.length} raw products`)
+    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false, scroll: false })
+    console.log(`[Firecrawl] ${storeName}: stage-1 (no scroll) returned ${products.length} raw products`)
 
-    // Stage 2 retry on 0 results: 9s wait + alternate selector prompt.
+    // Attempt 2 on 0 results: 9s wait + scroll + alternate selector prompt.
     if (products.length === 0) {
-      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=9000ms, alternate prompt)`)
-      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true })
+      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=9000ms, scroll, alternate prompt)`)
+      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true, scroll: true })
       console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
     }
     return normalizeProducts(products, storeName, query)
@@ -853,22 +902,23 @@ Deno.serve(async (req) => {
     try {
       if (config.method === 'native') {
         if (!config.nativeScraper) throw new Error('Native scraper not configured')
-        // 12-SECOND RULE: race the native scraper. If stalls past 12s, fall back to Firecrawl.
-        products = await raceWithTimeout(config.nativeScraper(trimmedQuery), NATIVE_RACE_TIMEOUT_MS, store)
+        // ── 3-STAGE RETRIEVAL ──
+        // Stages 1 & 2: native scraper (3s each, Stage 2 = UA rotation + modified params).
+        products = await runNativeStages(config.nativeScraper, trimmedQuery, store)
 
-        // ── Safety Valve: native returned 0 → silently fall back to Firecrawl ──
+        // Stage 3: Firecrawl multi-strategy fallback (5s no-scroll → 9s + scroll + alt prompt).
         if (products.length === 0 && firecrawlKey) {
-          console.log(`[${store}] Safety Valve triggered — native returned 0, trying Firecrawl fallback`)
+          console.log(`[${store}] Stage 3 (Firecrawl multi-strategy) — both native stages returned 0`)
           if (user_id) {
             txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, trimmedQuery)
-            if (!txId) console.log(`[${store}] Safety Valve skipped — no credits`)
+            if (!txId) console.log(`[${store}] Stage 3 skipped — no credits`)
           }
           if (!user_id || txId) {
             const fallback = await scrapeWithFirecrawl(trimmedQuery, store, config.searchUrl(trimmedQuery), firecrawlKey)
             if (fallback.length > 0) {
               products = fallback
               usedFallback = true
-              console.log(`[${store}] Safety Valve recovered ${products.length} items via Firecrawl`)
+              console.log(`[${store}] Stage 3 recovered ${products.length} items via Firecrawl`)
             }
           }
         }
