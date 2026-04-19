@@ -1200,6 +1200,9 @@ Deno.serve(async (req) => {
       console.warn(`[${store}] search_logs insert exception:`, logErr)
     }
 
+    // ── Persist benchmark to regression_logs (fire-and-forget) ──
+    persistRegressionLog(supabaseUrl, supabaseKey, store, totalLatencyMs, benchmark)
+
     // ── Part 6: Mandatory response contract (Phase 4 fields are ADDITIVE) ──
     return new Response(JSON.stringify({
       success: true,
