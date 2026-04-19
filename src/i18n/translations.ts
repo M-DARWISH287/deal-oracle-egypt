@@ -31,6 +31,7 @@ export const translations = {
     searchButton: 'Search',
     trending: 'Trending Searches',
     bestPrice: 'Best Price',
+    bestValue: 'Best Value',
     buy: 'Buy',
     copyLink: 'Copy Link',
     copied: 'Copied!',
