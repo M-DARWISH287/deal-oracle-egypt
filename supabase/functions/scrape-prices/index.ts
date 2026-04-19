@@ -515,34 +515,57 @@ async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
 // only the active discount survives, and Math.min picks the lowest.
 async function scrape2B(query: string): Promise<RawProduct[]> {
   try {
-    // Append "smartphone" to disambiguate (avoid accessory-dominated organic ranking)
     const mobileQuery = `${query} smartphone`
     const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(mobileQuery)}`
     const res = await fetchWithTimeout(url)
     if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
     const html = await res.text()
-    const items: Partial<RawProduct>[] = []
+
+    // ── STREAMING extraction: walk <li class="product-item"> sequentially with regex.exec,
+    // filter accessories + relevance per node, stop at 5 valid products. Avoids the
+    // slice(0,50)-then-filter bug where accessory-heavy pages returned 0.
     const itemRe = /<li[^>]*class="[^"]*\bproduct-item\b[^"]*"[\s\S]*?<\/li>/g
-    const blocks = html.match(itemRe) || []
-    for (const b of blocks.slice(0, 50)) {
+    const accepted: Partial<RawProduct>[] = []
+    const scores = new Map<string, number>()
+    let scanned = 0
+    let m: RegExpExecArray | null
+    while ((m = itemRe.exec(html)) !== null) {
+      if (accepted.length >= 5) break
+      if (++scanned > 200) break
+      const b = m[0]
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
-      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
       if (!linkMatch) continue
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://2b.com.eg')
       if (!absUrl) continue
-      const lowestPrice = extractLowestPrice(b) // strips old-price first
+      const name = stripTags(linkMatch[2])
+
+      // Per-node gate: drop accessories + irrelevant items BEFORE price extraction.
+      const score = acceptItem(name, undefined, query, '2B Egypt')
+      if (score === null) continue
+
+      const lowestPrice = extractLowestPrice(b)
       if (!lowestPrice) continue
-      items.push({
-        name: stripTags(linkMatch[2]),
-        url: absUrl,
-        price: lowestPrice,
-        image: imgMatch ? imgMatch[1] : '',
-      })
+      const imgMatch = b.match(/<img[^>]+src="([^"]+)"/)
+      accepted.push({ name, url: absUrl, price: lowestPrice, image: imgMatch ? imgMatch[1] : '' })
+      scores.set(absUrl, score)
     }
-    console.log(`[2B native] ${items.length} raw items`)
-    return normalizeProducts(items, '2B Egypt', query)
+    console.log(`[2B native] streamed ${scanned} items, accepted ${accepted.length}`)
+    return accepted
+      .map(p => {
+        const parsed = parsePrice(p.price as any)
+        return {
+          name: String(p.name), name_ar: String(p.name), price: parsed ?? 0,
+          url: String(p.url), image: p.image || '', specs: '', store: '2B Egypt',
+          isRefurbished: checkRefurbished(String(p.name)),
+          confidenceScore: scores.get(String(p.url)) ?? 0,
+        } as RawProduct
+      })
+      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
+    return []
+  }
+}
     return []
   }
 }
