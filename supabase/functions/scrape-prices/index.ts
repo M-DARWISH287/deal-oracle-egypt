@@ -48,6 +48,7 @@ const STEALTH_HEADERS: Record<string, string> = {
 interface RawProduct {
   name: string; name_ar?: string; price: number | string;
   url: string; image?: string; specs?: string; store: string; isRefurbished?: boolean;
+  confidenceScore?: number;
 }
 
 type ScrapeMethod = 'native' | 'firecrawl'
