@@ -80,6 +80,60 @@ export type Database = {
         }
         Relationships: []
       }
+      regression_logs: {
+        Row: {
+          bottleneck: string | null
+          created_at: string
+          expansion_quality: number | null
+          id: string
+          intent_accuracy: number | null
+          key_issues: Json
+          key_strengths: Json
+          latency_ms: number | null
+          overall_score: number | null
+          performance: number | null
+          query: string
+          retrieval_health: number | null
+          stage_used: string | null
+          status: string
+          store: string | null
+        }
+        Insert: {
+          bottleneck?: string | null
+          created_at?: string
+          expansion_quality?: number | null
+          id?: string
+          intent_accuracy?: number | null
+          key_issues?: Json
+          key_strengths?: Json
+          latency_ms?: number | null
+          overall_score?: number | null
+          performance?: number | null
+          query: string
+          retrieval_health?: number | null
+          stage_used?: string | null
+          status: string
+          store?: string | null
+        }
+        Update: {
+          bottleneck?: string | null
+          created_at?: string
+          expansion_quality?: number | null
+          id?: string
+          intent_accuracy?: number | null
+          key_issues?: Json
+          key_strengths?: Json
+          latency_ms?: number | null
+          overall_score?: number | null
+          performance?: number | null
+          query?: string
+          retrieval_health?: number | null
+          stage_used?: string | null
+          status?: string
+          store?: string | null
+        }
+        Relationships: []
+      }
       search_cache: {
         Row: {
           created_at: string
@@ -151,6 +205,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      cleanup_regression_logs: { Args: never; Returns: undefined }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
