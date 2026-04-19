@@ -9,8 +9,9 @@ import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { searchStore, groupProducts, clientFilterWithFallback, getRelevantStores, type RawProduct, type Product } from '@/lib/api';
-import { rankByBestValue } from '@/lib/decisionEngine';
-import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { rankByBestValue, pickCheapestWinner } from '@/lib/decisionEngine';
+import { BestDealCard } from '@/components/BestDealCard';
+import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const SearchResults = () => {
@@ -27,6 +28,7 @@ const SearchResults = () => {
   const [priceRange, setPriceRange] = useState<[number, number]>([0, 999999]);
   const [activeStores, setActiveStores] = useState<string[]>([]);
   const [storeFilter, setStoreFilter] = useState<string | null>(null);
+  const [showMore, setShowMore] = useState(false);
   const allProductsRef = useRef<RawProduct[]>([]);
 
   const handleSearch = useCallback((newQuery: string) => {
@@ -82,7 +84,7 @@ const SearchResults = () => {
   const totalStores = activeStores.length;
   const doneStores = completedStores.size;
 
-  const { displayProducts, isRelaxed, availableStores, engineMeta } = useMemo(() => {
+  const { displayProducts, isRelaxed, availableStores, engineMeta, winner } = useMemo(() => {
     const { strict, relaxed } = clientFilterWithFallback(products, query);
     const base = strict.length > 0 ? strict : relaxed;
     const relaxedMode = strict.length === 0 && relaxed.length > 0;
@@ -94,15 +96,16 @@ const SearchResults = () => {
     const filtered = storeFilter
       ? priceFiltered.filter(p => p.offers.some(o => o.store === storeFilter))
       : priceFiltered;
-    // ── BEST VALUE DECISION ENGINE ──
-    // Re-rank by composite score (price + store reliability + data confidence).
-    // The cheapest offer is NOT always the winner — reliability matters.
+    // Decision Engine still computes Best-Value scoring for the "More results" list,
+    // but the SINGLE hero card uses pure cheapest-wins per product spec.
     const ranked = rankByBestValue(filtered);
+    const cheapest = pickCheapestWinner(filtered);
     return {
       displayProducts: ranked.products,
       isRelaxed: relaxedMode,
       availableStores: stores,
       engineMeta: ranked.scoringMeta,
+      winner: cheapest,
     };
   }, [products, query, priceRange, storeFilter]);
 
@@ -118,14 +121,13 @@ const SearchResults = () => {
     }
   }, [sliderProducts.length, isLoading]);
 
-  // Dev observability: log the engine meta whenever the ranked set changes,
-  // so we can confirm in the browser console that the Best Value engine fired
-  // and which stores fed into the ranking.
+  // Dev observability: log engine meta + winner pipeline trace.
   useEffect(() => {
     if (engineMeta && displayProducts.length > 0) {
       console.log('[BestValueEngine]', engineMeta);
+      console.log('[CheapestWinner]', winner.pipelineTrace);
     }
-  }, [engineMeta, displayProducts.length]);
+  }, [engineMeta, displayProducts.length, winner.pipelineTrace]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -257,11 +259,30 @@ const SearchResults = () => {
           </div>
         )}
 
-        {displayProducts.length > 0 && (
-          <div className="space-y-4">
-            {displayProducts.map((product, i) => (
-              <ProductCard key={product.id} product={product} index={i} />
-            ))}
+        {winner.bestProduct && winner.cheapestOffer && (
+          <BestDealCard
+            product={winner.bestProduct}
+            cheapestOffer={winner.cheapestOffer}
+            priceComparison={winner.priceComparison}
+          />
+        )}
+
+        {winner.others.length > 0 && (
+          <div className="space-y-3">
+            <button
+              onClick={() => setShowMore(v => !v)}
+              className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-foreground hover:bg-secondary transition-colors"
+            >
+              {showMore ? t('hideMoreResults') : `${t('moreResults')} (${winner.others.length})`}
+              {showMore ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </button>
+            {showMore && (
+              <div className="space-y-4 animate-fade-in">
+                {displayProducts.slice(1).map((product, i) => (
+                  <ProductCard key={product.id} product={product} index={i} />
+                ))}
+              </div>
+            )}
           </div>
         )}
 
