@@ -55,6 +55,16 @@ export function ProductCard({ product, index }: ProductCardProps) {
           </h3>
 
           <div className="flex flex-wrap items-center gap-1.5 mb-2">
+            {typeof product.confidenceScore === 'number' && product.confidenceScore >= 90 && (
+              <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200 text-[10px] sm:text-xs">
+                🟢 {lang === 'ar' ? 'أفضل تطابق' : 'Best Match'}
+              </Badge>
+            )}
+            {typeof product.confidenceScore === 'number' && product.confidenceScore >= 60 && product.confidenceScore < 90 && (
+              <Badge className="bg-yellow-100 text-yellow-700 border-yellow-200 text-[10px] sm:text-xs">
+                🟡 {lang === 'ar' ? 'تطابق جزئي' : 'Partial Match'}
+              </Badge>
+            )}
             {product.isRefurbished && (
               <Badge className="bg-orange-100 text-orange-700 border-orange-200 text-[10px] sm:text-xs">
                 <RefreshCw className="h-3 w-3 mr-1" />

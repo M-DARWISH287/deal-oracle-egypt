@@ -17,6 +17,7 @@ export function getRelevantStores(_query: string): StoreName[] {
 export interface RawProduct {
   name: string; name_ar?: string; price: number;
   url: string; image?: string; specs?: string; store: string; isRefurbished?: boolean;
+  confidenceScore?: number;
 }
 
 export interface StoreOffer { store: string; price: number; url: string; currency: string; }
@@ -28,6 +29,7 @@ export interface Product {
   image: string; category: string;
   offers: StoreOffer[];
   isRefurbished?: boolean; isVariant?: boolean;
+  confidenceScore?: number;
 }
 
 export interface StoreSearchResult {
@@ -152,19 +154,37 @@ function tokenizeForRelevance(s: string): string[] {
     .filter(t => t.length >= 2);
 }
 
-export function validateRelevance(query: string, title: string): boolean {
+export interface RelevanceResult {
+  isRelevant: boolean;
+  score: number;
+}
+
+export function validateRelevance(query: string, title: string): RelevanceResult {
   const qTokens = tokenizeForRelevance(query);
   const tTokens = tokenizeForRelevance(title);
-  if (qTokens.length === 0 || tTokens.length === 0) return false;
+  if (qTokens.length === 0 || tTokens.length === 0) return { isRelevant: false, score: 0 };
   const tSet = new Set(tTokens);
   const qNumbers = qTokens.filter(t => /^\d+$/.test(t));
   const qWords = qTokens.filter(t => !/^\d+$/.test(t));
-  for (const n of qNumbers) if (!tSet.has(n)) return false;
-  if (qWords.length === 0) return qNumbers.length > 0;
+  // Strict numeric: instant fail if any query number missing.
+  for (const n of qNumbers) if (!tSet.has(n)) return { isRelevant: false, score: 0 };
   let hits = 0;
   for (const w of qWords) if (tSet.has(w)) hits++;
-  const required = Math.max(1, Math.ceil(qWords.length * 0.6));
-  return hits >= required;
+  const totalHits = hits + qNumbers.length;
+  const totalQ = qWords.length + qNumbers.length;
+  const overlapPct = totalQ > 0 ? (totalHits / totalQ) * 100 : 0;
+  const normQ = normalizeForRelevance(query).trim();
+  const normT = normalizeForRelevance(title);
+  const substringBonus = normQ.length > 0 && normT.includes(normQ) ? 20 : 0;
+  const score = Math.min(100, Math.round(overlapPct + substringBonus));
+  let isRelevant: boolean;
+  if (qWords.length === 0) {
+    isRelevant = qNumbers.length > 0;
+  } else {
+    const required = Math.max(1, Math.ceil(qWords.length * 0.6));
+    isRelevant = hits >= required;
+  }
+  return { isRelevant, score };
 }
 
 export function clientFilterWithFallback(
@@ -188,7 +208,10 @@ export function clientFilterWithFallback(
 
     // GLOBAL RELEVANCE GATE — reject anything whose title doesn't match the query.
     const titleForRelevance = `${clone.name.en} ${clone.name.ar}`;
-    if (!validateRelevance(query, titleForRelevance)) continue;
+    const rel = validateRelevance(query, titleForRelevance);
+    if (!rel.isRelevant) continue;
+    // Take the higher of server-attached score vs client-recomputed score.
+    if (rel.score > (clone.confidenceScore ?? 0)) clone.confidenceScore = rel.score;
 
     // Strict brand matching: drop cross-brand pollution
     let brandMismatch = false;
@@ -256,6 +279,10 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
           group.offers.push({ store: p.store, price: p.price, url: p.url, currency: 'EGP' });
         }
         if (p.image && !group.image) group.image = p.image;
+        // Keep the MAX confidence score across all offers in the group.
+        if ((p.confidenceScore ?? 0) > (group.confidenceScore ?? 0)) {
+          group.confidenceScore = p.confidenceScore;
+        }
         matched = true; break;
       }
     }
@@ -267,13 +294,17 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
         image: p.image || '', category: 'electronics',
         offers: [{ store: p.store, price: p.price, url: p.url, currency: 'EGP' }],
         isRefurbished: p.isRefurbished || false,
+        confidenceScore: p.confidenceScore ?? 0,
       });
     }
   }
   return Array.from(grouped.values())
     .map(p => { p.offers.sort((a, b) => a.price - b.price); return p; })
     .sort((a, b) => {
-      if (b.offers.length !== a.offers.length) return b.offers.length - a.offers.length;
+      // 1) Confidence score DESC, 2) price ASC.
+      const sa = a.confidenceScore ?? 0;
+      const sb = b.confidenceScore ?? 0;
+      if (sb !== sa) return sb - sa;
       return a.offers[0].price - b.offers[0].price;
     }).slice(0, 30);
 }
