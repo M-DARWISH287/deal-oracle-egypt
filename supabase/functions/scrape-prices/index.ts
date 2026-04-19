@@ -8,10 +8,24 @@ const corsHeaders = {
 const CACHE_TTL_HOURS = 12
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
+// THE 12-SECOND RULE: Native scrapers race against this internal timeout.
+// If they exceed it, we immediately fall back to Firecrawl extract mode.
+const NATIVE_RACE_TIMEOUT_MS = 12000
 // Firecrawl needs more headroom (renders JS + waitFor 5s + LLM extract). Each store
 // runs in its own edge function invocation (client uses Promise.allSettled), so a
 // long timeout on one store does NOT block the others.
 const FIRECRAWL_TIMEOUT_MS = 90000
+
+// Promise.race helper: resolves with [] if the underlying scraper exceeds timeoutMs.
+function raceWithTimeout<T>(p: Promise<T[]>, timeoutMs: number, label: string): Promise<T[]> {
+  return Promise.race([
+    p,
+    new Promise<T[]>((resolve) => setTimeout(() => {
+      console.log(`[${label}] Native exceeded ${timeoutMs}ms — bailing out`)
+      resolve([])
+    }, timeoutMs)),
+  ])
+}
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
