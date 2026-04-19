@@ -72,11 +72,14 @@ interface RawProduct {
 
 type ScrapeMethod = 'native' | 'firecrawl'
 
+type ScrapeStage = 1 | 2;
 interface StoreConfig {
   searchUrl: (q: string) => string;
   method: ScrapeMethod;
   tier: 1 | 2 | 3;
-  nativeScraper?: (q: string) => Promise<RawProduct[]>;
+  // Native scraper accepts an optional stage flag: stage=2 enables UA rotation +
+  // modified request params (different page/size). See 3-stage retrieval algorithm.
+  nativeScraper?: (q: string, stage?: ScrapeStage) => Promise<RawProduct[]>;
 }
 
 // ── Helpers ──
