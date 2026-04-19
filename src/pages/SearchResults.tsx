@@ -9,6 +9,7 @@ import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { searchStore, groupProducts, clientFilterWithFallback, getRelevantStores, type RawProduct, type Product } from '@/lib/api';
+import { rankByBestValue } from '@/lib/decisionEngine';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
@@ -81,7 +82,7 @@ const SearchResults = () => {
   const totalStores = activeStores.length;
   const doneStores = completedStores.size;
 
-  const { displayProducts, isRelaxed, availableStores } = useMemo(() => {
+  const { displayProducts, isRelaxed, availableStores, engineMeta } = useMemo(() => {
     const { strict, relaxed } = clientFilterWithFallback(products, query);
     const base = strict.length > 0 ? strict : relaxed;
     const relaxedMode = strict.length === 0 && relaxed.length > 0;
@@ -93,7 +94,16 @@ const SearchResults = () => {
     const filtered = storeFilter
       ? priceFiltered.filter(p => p.offers.some(o => o.store === storeFilter))
       : priceFiltered;
-    return { displayProducts: filtered, isRelaxed: relaxedMode, availableStores: stores };
+    // ── BEST VALUE DECISION ENGINE ──
+    // Re-rank by composite score (price + store reliability + data confidence).
+    // The cheapest offer is NOT always the winner — reliability matters.
+    const ranked = rankByBestValue(filtered);
+    return {
+      displayProducts: ranked.products,
+      isRelaxed: relaxedMode,
+      availableStores: stores,
+      engineMeta: ranked.scoringMeta,
+    };
   }, [products, query, priceRange, storeFilter]);
 
   const sliderProducts = useMemo(() => {
@@ -107,6 +117,15 @@ const SearchResults = () => {
       setPriceRange([Math.floor(Math.min(...prices)), Math.ceil(Math.max(...prices))]);
     }
   }, [sliderProducts.length, isLoading]);
+
+  // Dev observability: log the engine meta whenever the ranked set changes,
+  // so we can confirm in the browser console that the Best Value engine fired
+  // and which stores fed into the ranking.
+  useEffect(() => {
+    if (engineMeta && displayProducts.length > 0) {
+      console.log('[BestValueEngine]', engineMeta);
+    }
+  }, [engineMeta, displayProducts.length]);
 
   return (
     <div className="min-h-screen bg-slate-50">
