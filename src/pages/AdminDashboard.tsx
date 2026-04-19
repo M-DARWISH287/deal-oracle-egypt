@@ -3,7 +3,9 @@ import { supabase } from '@/integrations/supabase/client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { BarChart3, Search, TrendingUp, Activity, Loader2 } from 'lucide-react';
+import { BarChart3, Search, TrendingUp, Activity, Loader2, Download } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
 
 interface SearchLog {
   id: string;
@@ -16,6 +18,30 @@ export default function AdminDashboard() {
   const [logs, setLogs] = useState<SearchLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownloadReport = async () => {
+    setDownloading(true);
+    try {
+      const url = `https://guynfpxitlwzndninzfo.supabase.co/functions/v1/generate-report`;
+      const res = await fetch(url, { method: 'GET' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      const objectUrl = URL.createObjectURL(blob);
+      a.href = objectUrl;
+      a.download = 'benchmark-report-last-10-days.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+      toast.success('Report downloaded');
+    } catch (e) {
+      toast.error(`Failed to generate report: ${String(e)}`);
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   useEffect(() => {
     async function load() {
@@ -68,9 +94,15 @@ export default function AdminDashboard() {
     <div className="min-h-screen bg-background p-6 md:p-10" dir="ltr">
       <div className="max-w-7xl mx-auto space-y-8">
         <header className="space-y-2">
-          <div className="flex items-center gap-3">
-            <BarChart3 className="h-7 w-7 text-primary" />
-            <h1 className="text-3xl font-bold tracking-tight">Admin Dashboard</h1>
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="flex items-center gap-3">
+              <BarChart3 className="h-7 w-7 text-primary" />
+              <h1 className="text-3xl font-bold tracking-tight">Admin Dashboard</h1>
+            </div>
+            <Button onClick={handleDownloadReport} disabled={downloading} size="sm">
+              {downloading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Download className="h-4 w-4 mr-2" />}
+              Download 10-day Report
+            </Button>
           </div>
           <p className="text-muted-foreground">Search analytics &amp; market demand insights</p>
         </header>
