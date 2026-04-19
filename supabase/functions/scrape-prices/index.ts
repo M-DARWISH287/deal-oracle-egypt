@@ -408,9 +408,11 @@ interface BTechItem {
   categories_tree?: string[]
 }
 
-async function scrapeBTech(query: string): Promise<RawProduct[]> {
-  // Server Actions accept a JSON body. We use { search, page, size:50 }.
-  const body = JSON.stringify([{ search: query, page: '1', size: 50 }])
+async function scrapeBTech(query: string, stage: ScrapeStage = 1): Promise<RawProduct[]> {
+  // Stage 1: page=1, size=50, Safari UA. Stage 2: page=2, size=30, Firefox UA.
+  const isStage2 = stage === 2
+  const body = JSON.stringify([{ search: query, page: isStage2 ? '2' : '1', size: isStage2 ? 30 : 50 }])
+  const tag = `B.TECH stage-${stage}`
   let res: Response
   try {
     res = await fetchWithTimeout('https://btech.com/en', {
@@ -421,15 +423,15 @@ async function scrapeBTech(query: string): Promise<RawProduct[]> {
         'Next-Action': BTECH_ACTION_ID,
         'Origin': 'https://btech.com',
         'Referer': 'https://btech.com/en',
-        ...STEALTH_HEADERS,
+        ...(isStage2 ? STEALTH_HEADERS_ALT : STEALTH_HEADERS),
       },
       body,
     }, 10000)
   } catch (err) {
-    console.error('[B.TECH] Server Action fetch failed:', err)
+    console.error(`[${tag}] Server Action fetch failed:`, err)
     return []
   }
-  if (!res.ok) { console.error(`[B.TECH] Server Action HTTP ${res.status}`); return [] }
+  if (!res.ok) { console.error(`[${tag}] Server Action HTTP ${res.status}`); return [] }
   const text = await res.text()
 
   // RSC stream: lines like "<hex-id>:<json>". Find the line whose JSON contains
