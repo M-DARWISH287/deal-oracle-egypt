@@ -103,15 +103,23 @@ function matchesIntent(query: string, productName: string): boolean {
   return true
 }
 
+// MOBILE-STRICT: drop accessories AND non-mobile categories (smartwatches, laptops, tablets, TVs).
 const ACCESSORY_KEYWORDS = [
+  // Accessories (EN)
   'case', 'cover', 'protector', 'screen protector', 'tempered glass',
   'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
-  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
   'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
   'film', 'glass', 'lens protector', 'camera protector',
+  // Accessories (AR)
+  'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
+  // Non-mobile categories (EN)
+  'smartwatch', 'smart watch', 'laptop', 'notebook', 'tablet', 'ipad',
+  'tv ', ' tv', 'television', 'monitor', 'headphone', 'speaker',
+  // Non-mobile categories (AR)
+  'ساعة', 'لاب توب', 'لابتوب', 'تابلت', 'تلفزيون', 'تليفزيون', 'شاشة',
 ]
 function isAccessory(name: string): boolean {
-  const lower = name.toLowerCase()
+  const lower = ` ${name.toLowerCase()} `
   return ACCESSORY_KEYWORDS.some(kw => lower.includes(kw))
 }
 
