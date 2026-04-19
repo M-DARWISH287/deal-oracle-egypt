@@ -1,7 +1,34 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 // PHASE 4 — semantic intelligence layer (additive; pipeline untouched)
 import { canonicalizeQuery, expandQueries, semanticRerank, routeStores, type SemanticIntent } from './semantic.ts'
-import { runBenchmark } from './benchmark.ts'
+import { runBenchmark, type BenchmarkReport } from './benchmark.ts'
+
+// Fire-and-forget insert into regression_logs (service-role bypass; never blocks the response).
+function persistRegressionLog(
+  supabaseUrl: string, supabaseKey: string,
+  store: string, stageUsed: string, latencyMs: number, b: BenchmarkReport,
+) {
+  try {
+    const c = createClient(supabaseUrl, supabaseKey)
+    c.from('regression_logs').insert({
+      query: b.query,
+      store,
+      stage_used: stageUsed,
+      latency_ms: latencyMs,
+      intent_accuracy: b.intent_accuracy,
+      expansion_quality: b.expansion_quality,
+      retrieval_health: b.retrieval_health,
+      performance: b.performance,
+      overall_score: b.overall_score,
+      status: b.status,
+      bottleneck: b.detected_bottleneck,
+      key_issues: b.key_issues,
+      key_strengths: b.key_strengths,
+    }).then(({ error }: { error: { message: string } | null }) => {
+      if (error) console.warn(`[${store}] regression_logs insert failed:`, error.message)
+    })
+  } catch (e) { console.warn(`[${store}] regression_logs insert exception:`, e) }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -1113,6 +1140,7 @@ Deno.serve(async (req) => {
         stage_used: 'FAIL', attempts: 0, products_count: 0, latency_ms: errLatency,
         invalid_items_count: 0, selected_stores: [store], routing_scores: {},
       })
+      persistRegressionLog(supabaseUrl, supabaseKey, store, 'FAIL', errLatency, errBenchmark)
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
         stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
@@ -1198,6 +1226,9 @@ Deno.serve(async (req) => {
     } catch (logErr) {
       console.warn(`[${store}] search_logs insert exception:`, logErr)
     }
+
+    // ── Persist benchmark to regression_logs (fire-and-forget) ──
+    persistRegressionLog(supabaseUrl, supabaseKey, store, pipeline.stage_used, totalLatencyMs, benchmark)
 
     // ── Part 6: Mandatory response contract (Phase 4 fields are ADDITIVE) ──
     return new Response(JSON.stringify({
