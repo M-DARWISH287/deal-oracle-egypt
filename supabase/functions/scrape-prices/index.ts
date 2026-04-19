@@ -1160,9 +1160,14 @@ Deno.serve(async (req) => {
       }
     }
 
-    const trimmedQuery = query.trim().toLowerCase()
+    // ── DETERMINISTIC NORMALIZATION (runs BEFORE routing) ──
+    // Arabic brand tokens → English equivalents so native scraper URLs (which index
+    // English brand keywords) get hits. Original query preserved for logs/cache key.
+    const { execution: normalizedQuery, original: originalQuery } = normalizeQuery(query)
+    const trimmedQuery = normalizedQuery.toLowerCase()
+    // Cache key uses the NORMALIZED query so AR/EN variants of the same intent share cache.
     const cacheKey = `${store}:${trimmedQuery}`
-    console.log(`[${store}] Query: "${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
+    console.log(`[${store}] original="${originalQuery}" normalized_query="${trimmedQuery}" user=${user_id || 'anon'}${force_refresh ? ' [FORCE REFRESH]' : ''}`)
 
     // ── Check cache (skipped on force refresh) ──
     if (!force_refresh) {
