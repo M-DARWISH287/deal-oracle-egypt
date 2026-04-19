@@ -123,7 +123,8 @@ function detectVariant(s: string): string | undefined {
 }
 
 function detectModelNumber(s: string): string | undefined {
-  const m = s.match(/\b(\d{1,3})\b/)
+  // Match standalone numbers OR numbers glued to a single letter (s24, a55, ps5, mi 11, etc.)
+  const m = s.match(/(?:^|[\s])(?:[a-z]?)(\d{1,3})(?=[\s]|$)/) || s.match(/\b(\d{1,3})\b/)
   return m ? m[1] : undefined
 }
 
