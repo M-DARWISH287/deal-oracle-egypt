@@ -97,29 +97,37 @@ export function ProductCard({ product, index }: ProductCardProps) {
 
           <p className="text-xs sm:text-sm text-muted-foreground mb-3 line-clamp-1 break-words">{product.specs[lang]}</p>
 
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
             <span className="text-lg sm:text-xl font-bold text-foreground">
-              {formatPrice(bestPrice.price)} {t('egp')}
+              {formatPrice(headlineOffer.price)} {t('egp')}
             </span>
             <span className="text-xs sm:text-sm text-muted-foreground truncate">
-              {t('from')} {bestPrice.store}
+              {t('from')} {headlineOffer.store}
             </span>
+            {isBestValueDifferentFromCheapest && (
+              <span className="text-[10px] sm:text-xs text-muted-foreground">
+                · {lang === 'ar' ? 'أرخص:' : 'cheapest:'} {formatPrice(cheapestPrice)} {t('egp')}
+              </span>
+            )}
           </div>
 
           <div className="space-y-2">
-            {sortedOffers.map((offer, i) => (
+            {sortedOffers.map((offer, i) => {
+              const isWinner = i === 0;
+              const scored = isScoredOffer(offer) ? offer : null;
+              return (
               <div
                 key={`${offer.store}-${offer.price}-${offer.url}`}
                 className={`flex items-center gap-2 sm:gap-3 rounded-xl px-2.5 sm:px-3 py-2 sm:py-2.5 transition-colors ${
-                  i === 0
+                  isWinner
                     ? 'bg-emerald-50 border border-emerald-200'
                     : 'bg-secondary hover:bg-secondary/80'
                 }`}
               >
-                {i === 0 && (
+                {isWinner && (
                   <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 shrink-0">
-                    <Tag className="h-2.5 w-2.5" />
-                    {t('bestPrice')}
+                    {scored ? <Sparkles className="h-2.5 w-2.5" /> : <Tag className="h-2.5 w-2.5" />}
+                    {scored ? t('bestValue') : t('bestPrice')}
                   </span>
                 )}
                 <div className="shrink-0 w-12 sm:w-16 h-6 sm:h-8 flex items-center justify-center rounded bg-white px-1 overflow-hidden">
