@@ -5,7 +5,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-const CACHE_TTL_HOURS = 12
+// Global persistent cache TTL: 3h (Supabase-backed `search_cache`, key = store:query).
+// Persistent across cold starts and shared across all edge function invocations.
+const CACHE_TTL_HOURS = 3
 const MINIMUM_PRICE_THRESHOLD = 1500
 const STORE_TIMEOUT_MS = 15000
 // THE 12-SECOND RULE: native scrapers race against this internal timeout.
