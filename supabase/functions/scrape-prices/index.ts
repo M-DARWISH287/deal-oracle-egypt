@@ -1056,8 +1056,11 @@ async function runStage3_Firecrawl(
 interface PipelineResult {
   products: RawProduct[]
   stage_used: StageUsed
+  stages_attempted: Array<'API' | 'RETRY' | 'FIRECRAWL'>  // ordered list of stages we ran
   attempts: number
   usedFallback: boolean
+  fallback_mandatory: boolean       // true if Stage 1/2 failed → fallback was REQUIRED
+  fallback_reason: FallbackReason   // standardized enum (NONE if no fallback was needed)
   avgRelevance: number
   invalidCount: number
   totalLatencyMs: number
@@ -1070,11 +1073,15 @@ async function runRetrievalPipeline(
 ): Promise<PipelineResult> {
   const t0 = Date.now()
   let stage_used: StageUsed = 'API'
+  const stages_attempted: Array<'API' | 'RETRY' | 'FIRECRAWL'> = []
   let attempts = 0
   let bestProducts: RawProduct[] = []
   let bestAvg = 0
   let bestInvalid = 0
   let usedFallback = false
+  let fallback_reason: FallbackReason = 'NONE'
+  // Tracks the cause of the most recent native failure — used as the fallback trigger reason.
+  let nativeFailureCause: FallbackReason | null = null
 
   const elapsed = () => Date.now() - t0
   const remainingMs = () => MAX_TOTAL_MS - elapsed()
@@ -1085,68 +1092,82 @@ async function runRetrievalPipeline(
   // ── STAGE 1: API ──
   if (hasNative) {
     attempts++
+    stages_attempted.push('API')
     const s1 = await runStage1_API(config.nativeScraper!, query, store)
-    console.log(`[${store}] Stage 1 (API): raw=${s1.rawCount} valid=${s1.products.length} avgRel=${s1.avgRelevance} ${s1.latencyMs}ms`)
+    console.log(`[${store}] Stage 1 (API): raw=${s1.rawCount} valid=${s1.products.length} avgRel=${s1.avgRelevance} ${s1.latencyMs}ms failure=${s1.failure ?? 'none'}`)
     if (s1.ok) {
       stage_used = 'API'
       bestProducts = s1.products; bestAvg = s1.avgRelevance; bestInvalid = s1.invalidCount
       // Part 9: early exit (Stage 1 was good enough — skip 2 & 3).
       if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
-        return { products: bestProducts, stage_used, attempts, usedFallback,
+        return { products: bestProducts, stage_used, stages_attempted, attempts, usedFallback,
+          fallback_mandatory: false, fallback_reason: 'NONE',
           avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
       }
+    } else {
+      nativeFailureCause = s1.failure  // EMPTY_RESULT | TIMEOUT | NATIVE_ERROR | INVALID_RESPONSE
     }
   }
 
   // ── STAGE 2: RETRY (only if Stage 1 failed AND time remains) ──
   if (hasNative && bestProducts.length === 0 && remainingMs() > 2000) {
     attempts++
+    stages_attempted.push('RETRY')
     const s2 = await runStage2_Retry(config.nativeScraper!, query, store, remainingMs())
-    console.log(`[${store}] Stage 2 (RETRY): raw=${s2.rawCount} valid=${s2.products.length} avgRel=${s2.avgRelevance} ${s2.latencyMs}ms`)
+    console.log(`[${store}] Stage 2 (RETRY): raw=${s2.rawCount} valid=${s2.products.length} avgRel=${s2.avgRelevance} ${s2.latencyMs}ms failure=${s2.failure ?? 'none'}`)
     if (s2.ok) {
       stage_used = 'RETRY'
       bestProducts = s2.products; bestAvg = s2.avgRelevance; bestInvalid = s2.invalidCount
       if (bestProducts.length >= EARLY_EXIT_MIN_ITEMS && bestAvg >= EARLY_EXIT_MIN_RELEVANCE) {
-        return { products: bestProducts, stage_used, attempts, usedFallback,
+        return { products: bestProducts, stage_used, stages_attempted, attempts, usedFallback,
+          fallback_mandatory: true, fallback_reason: 'NONE',
           avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
       }
+    } else {
+      // Latest native cause overrides — Stage 2 outcome is most recent signal.
+      nativeFailureCause = s2.failure
     }
   }
 
   // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE) ──
   // Per safety rule: if native/API failed OR returned empty, Firecrawl MUST be attempted.
   // Only blockers allowed: missing API key, exhausted time budget, denied credit reservation.
-  let fallback_reason: string | null = null
-  if (bestProducts.length === 0) {
+  const fallback_mandatory = bestProducts.length === 0
+  if (fallback_mandatory) {
     if (!firecrawlKey) {
-      fallback_reason = 'firecrawl_key_missing'
-      console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured`)
+      fallback_reason = 'KEY_MISSING'
+      console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
     } else if (remainingMs() <= 3000) {
-      fallback_reason = 'time_budget_exhausted'
-      console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining`)
+      fallback_reason = 'BUDGET_EXHAUSTED'
+      console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining (fallback_reason=BUDGET_EXHAUSTED)`)
     } else {
       const creditOk = await options.reserveFirecrawlCredit()
       if (!creditOk) {
-        fallback_reason = 'credit_reserve_failed'
-        console.warn(`[${store}] Stage 3 SKIPPED — credit reservation failed`)
+        fallback_reason = 'CREDIT_LIMIT'
+        console.warn(`[${store}] Stage 3 SKIPPED — credit reservation failed (fallback_reason=CREDIT_LIMIT)`)
       } else {
         attempts++
-        console.log(`[${store}] FALLBACK_TRIGGERED_FIRECRAWL reason=${hasNative ? 'native_empty_or_error' : 'firecrawl_only_store'}`)
+        stages_attempted.push('FIRECRAWL')
+        const triggerReason = hasNative ? (nativeFailureCause ?? 'EMPTY_RESULT') : 'EMPTY_RESULT'
+        console.log(`[${store}] FALLBACK_TRIGGERED_FIRECRAWL trigger=${triggerReason} mandatory=true`)
         const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
-        console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms`)
+        console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms failure=${s3.failure ?? 'none'}`)
         if (s3.ok) {
           stage_used = 'FIRECRAWL'; usedFallback = true
           bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
+          fallback_reason = 'NONE'
         } else {
-          fallback_reason = 'firecrawl_returned_empty'
+          // Firecrawl ran but produced nothing — surface its specific failure cause.
+          fallback_reason = s3.failure ?? 'EMPTY_RESULT'
         }
       }
     }
   }
 
   if (bestProducts.length === 0) stage_used = 'FAIL'
-  console.log(`[${store}] PIPELINE_DONE stage_used=${stage_used} fallback_triggered=${usedFallback} fallback_reason=${fallback_reason ?? 'none'} attempts=${attempts} latency=${elapsed()}ms`)
-  return { products: bestProducts, stage_used, attempts, usedFallback,
+  console.log(`[${store}] PIPELINE_DONE stage_used=${stage_used} stages_attempted=[${stages_attempted.join(',')}] fallback_triggered=${usedFallback} fallback_mandatory=${fallback_mandatory} fallback_reason=${fallback_reason} attempts=${attempts} latency=${elapsed()}ms`)
+  return { products: bestProducts, stage_used, stages_attempted, attempts, usedFallback,
+    fallback_mandatory, fallback_reason,
     avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
 }
 
