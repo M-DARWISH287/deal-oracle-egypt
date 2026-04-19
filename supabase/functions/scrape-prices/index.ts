@@ -794,7 +794,8 @@ Deno.serve(async (req) => {
     try {
       if (config.method === 'native') {
         if (!config.nativeScraper) throw new Error('Native scraper not configured')
-        products = await config.nativeScraper(trimmedQuery)
+        // 12-SECOND RULE: race the native scraper. If it stalls past 12s, fall back to Firecrawl.
+        products = await raceWithTimeout(config.nativeScraper(trimmedQuery), NATIVE_RACE_TIMEOUT_MS, store)
 
         // ── Safety Valve: native returned 0 → silently fall back to Firecrawl ──
         if (products.length === 0 && firecrawlKey) {
