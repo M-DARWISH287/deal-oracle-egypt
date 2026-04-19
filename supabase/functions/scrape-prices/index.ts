@@ -303,7 +303,7 @@ async function scrapeJumia(query: string): Promise<RawProduct[]> {
 // + .a-price-whole for clean integer price (ignores decimals).
 async function scrapeAmazonEG(query: string): Promise<RawProduct[]> {
   try {
-    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&language=en_AE`
+    const url = `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
     const res = await fetchWithTimeout(url, { headers: STEALTH_HEADERS }, 10000)
     if (!res.ok) { console.log(`[Amazon native] HTTP ${res.status}`); return [] }
     const html = await res.text()
