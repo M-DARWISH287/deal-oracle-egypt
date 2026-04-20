@@ -24,6 +24,8 @@ export const translations = {
     priceComparison: 'مقارنة الأسعار',
     moreResults: 'عرض المزيد من النتائج',
     hideMoreResults: 'إخفاء النتائج الإضافية',
+    save: 'وفّر',
+    comparedTo: 'مقارنة بـ',
     language: 'English',
   },
   en: {
@@ -49,6 +51,8 @@ export const translations = {
     priceComparison: 'Price Comparison',
     moreResults: 'Show more results',
     hideMoreResults: 'Hide more results',
+    save: 'Save',
+    comparedTo: 'vs',
     language: 'العربية',
   },
 } as const;
