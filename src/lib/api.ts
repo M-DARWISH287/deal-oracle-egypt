@@ -273,44 +273,157 @@ function deepCloneProduct(p: Product): Product {
   return { ...p, name: { ...p.name }, specs: { ...p.specs }, offers: p.offers.map(o => ({ ...o })) };
 }
 
+// ── Title normalization for strict product grouping ──
+// Extracts brand + model + storage from a raw title so that offers from
+// different stores collapse into ONE group only when they describe the
+// exact same SKU (same model + same storage). Color is intentionally ignored.
+const BRAND_PATTERNS: Array<{ re: RegExp; brand: string }> = [
+  { re: /\bapple\b|\biphone\b|\bipad\b|\bmacbook\b|\bairpods?\b/i, brand: 'apple' },
+  { re: /\bsamsung\b|\bgalaxy\b/i, brand: 'samsung' },
+  { re: /\bxiaomi\b|\bredmi\b|\bpoco\b/i, brand: 'xiaomi' },
+  { re: /\bhuawei\b|\bhonor\b/i, brand: 'huawei' },
+  { re: /\boppo\b/i, brand: 'oppo' },
+  { re: /\bvivo\b/i, brand: 'vivo' },
+  { re: /\brealme\b/i, brand: 'realme' },
+  { re: /\binfinix\b/i, brand: 'infinix' },
+  { re: /\btecno\b/i, brand: 'tecno' },
+  { re: /\bsony\b|\bplaystation\b|\bps5\b|\bps4\b/i, brand: 'sony' },
+  { re: /\bmicrosoft\b|\bxbox\b|\bsurface\b/i, brand: 'microsoft' },
+  { re: /\bnintendo\b|\bswitch\b/i, brand: 'nintendo' },
+  { re: /\bdell\b/i, brand: 'dell' },
+  { re: /\bhp\b|\bhewlett\b/i, brand: 'hp' },
+  { re: /\blenovo\b|\bthinkpad\b/i, brand: 'lenovo' },
+  { re: /\basus\b|\brog\b/i, brand: 'asus' },
+  { re: /\bacer\b/i, brand: 'acer' },
+  { re: /\blg\b/i, brand: 'lg' },
+];
+
+interface NormalizedTitle {
+  brand: string;        // e.g. "apple" or "" if unknown
+  model: string;        // e.g. "iphone 15 pro" or first 2-4 distinguishing tokens
+  storage: string;      // e.g. "128gb" or "" if missing
+  raw: string;          // lowercased cleaned title (for fallback comparisons)
+}
+
+function normalizeTitle(title: string): NormalizedTitle {
+  const raw = (title || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+  // Brand
+  let brand = '';
+  for (const { re, brand: b } of BRAND_PATTERNS) {
+    if (re.test(raw)) { brand = b; break; }
+  }
+
+  // Storage — only count units that match real storage tiers, ignore RAM-only tokens.
+  // Match "128 gb", "128gb", "1 tb", "1tb"; skip values < 16gb (likely RAM).
+  let storage = '';
+  const storageMatches = Array.from(raw.matchAll(/(\d+(?:\.\d+)?)\s*(tb|gb)\b/g));
+  // Prefer the LARGEST storage-looking value (RAM is usually 4/6/8/12/16; storage is 64/128/256/512/1024).
+  let bestVal = 0;
+  for (const m of storageMatches) {
+    const n = parseFloat(m[1]);
+    const unit = m[2];
+    const gb = unit === 'tb' ? n * 1024 : n;
+    if (gb >= 32 && gb > bestVal) {
+      bestVal = gb;
+      storage = unit === 'tb' ? `${n}tb` : `${Math.round(n)}gb`;
+    }
+  }
+
+  // Model: strip brand + storage + common noise, then keep first ~4 tokens.
+  let modelSrc = raw
+    .replace(/\((.*?)\)/g, ' ')                               // drop parentheticals
+    .replace(/\b\d+(?:\.\d+)?\s*(?:tb|gb|mb)\b/g, ' ')         // drop storage tokens
+    .replace(/\b\d+\s*(?:hz|w|mah|mp|inch|"|''|cm|mm)\b/g, ' ') // drop spec units
+    .replace(/\b(black|white|blue|red|green|gold|silver|gray|grey|pink|purple|titanium|graphite|midnight|starlight|natural|space|rose|yellow|orange|أسود|أبيض|أزرق|أحمر|أخضر|ذهبي|فضي)\b/g, ' ')
+    .replace(/\b(new|brand|original|sealed|unlocked|dual|sim|5g|4g|lte|wifi|with|and|the|for|smartphone|mobile|phone|laptop|tablet)\b/g, ' ')
+    .replace(/[^\w\s\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (brand) modelSrc = modelSrc.replace(new RegExp(`\\b${brand}\\b`, 'g'), ' ').replace(/\s+/g, ' ').trim();
+
+  const tokens = modelSrc.split(' ').filter(Boolean).slice(0, 5);
+  const model = tokens.join(' ');
+
+  return { brand, model, storage, raw };
+}
+
+// Stable group key: brand_model_storage. If storage is missing, suffix with the URL
+// so the offer is NOT merged into a group whose storage we DO know — preventing
+// 128GB and 256GB (or unknown) from being compared as the same SKU.
+function buildGroupKey(n: NormalizedTitle, fallbackId: string): string {
+  if (!n.brand && !n.model) return `unknown_${fallbackId}`;
+  if (!n.storage) return `${n.brand}_${n.model}_nostorage_${fallbackId}`;
+  return `${n.brand}_${n.model}_${n.storage}`;
+}
+
+// Pick the canonical image for a group. Priority:
+//   1) image already assigned to the group, 2) Amazon Egypt offer image,
+//   3) first non-empty offer image. We track per-store images on the group
+//   via a side-map kept on the Product object (non-enumerable would be nicer
+//   but we just store on a known field).
+interface ProductWithImageMap extends Product {
+  _imagesByStore?: Record<string, string>;
+}
+
+function pickGroupImage(group: ProductWithImageMap): string {
+  if (group.image) return group.image;
+  const map = group._imagesByStore || {};
+  return map['Amazon Egypt'] || Object.values(map).find(Boolean) || '';
+}
+
 export function groupProducts(allProducts: RawProduct[]): Product[] {
-  const grouped = new Map<string, Product>();
+  const grouped = new Map<string, ProductWithImageMap>();
+
   for (const p of allProducts) {
     if (!p.price || p.price <= 0) continue;
-    const normalizedName = (p.name || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 60);
-    let matched = false;
-    for (const [key, group] of grouped) {
-      if (normalizedName.includes(key.slice(0, 25)) || key.includes(normalizedName.slice(0, 25))) {
-        if (!group.offers.some(o => o.store === p.store && o.url === p.url)) {
-          group.offers.push({ store: p.store, price: p.price, url: p.url, currency: 'EGP' });
-        }
-        if (p.image && !group.image) group.image = p.image;
-        // Keep the MAX confidence score across all offers in the group.
-        if ((p.confidenceScore ?? 0) > (group.confidenceScore ?? 0)) {
-          group.confidenceScore = p.confidenceScore;
-        }
-        matched = true; break;
-      }
-    }
-    if (!matched) {
-      grouped.set(normalizedName, {
+    const norm = normalizeTitle(p.name || '');
+    const key = buildGroupKey(norm, p.url);
+
+    let group = grouped.get(key);
+    if (!group) {
+      group = {
         id: crypto.randomUUID(),
         name: { en: p.name || '', ar: p.name_ar || p.name || '' },
         specs: { en: p.specs || '', ar: p.specs || '' },
-        image: p.image || '', category: 'electronics',
-        offers: [{ store: p.store, price: p.price, url: p.url, currency: 'EGP' }],
+        image: '',
+        category: 'electronics',
+        offers: [],
         isRefurbished: p.isRefurbished || false,
         confidenceScore: p.confidenceScore ?? 0,
-      });
+        _imagesByStore: {},
+      };
+      grouped.set(key, group);
+    }
+
+    if (!group.offers.some(o => o.store === p.store && o.url === p.url)) {
+      group.offers.push({ store: p.store, price: p.price, url: p.url, currency: 'EGP' });
+    }
+    if (p.image) {
+      group._imagesByStore![p.store] = group._imagesByStore![p.store] || p.image;
+    }
+    if ((p.confidenceScore ?? 0) > (group.confidenceScore ?? 0)) {
+      group.confidenceScore = p.confidenceScore;
+    }
+    // Prefer a title that contains the storage signal as the canonical display name.
+    if (norm.storage && !/\d+\s*(?:tb|gb)\b/i.test(group.name.en)) {
+      group.name = { en: p.name || group.name.en, ar: p.name_ar || p.name || group.name.ar };
     }
   }
+
   return Array.from(grouped.values())
-    .map(p => { p.offers.sort((a, b) => a.price - b.price); return p; })
+    .map(p => {
+      p.image = pickGroupImage(p);
+      delete p._imagesByStore;
+      p.offers.sort((a, b) => a.price - b.price);
+      return p as Product;
+    })
     .sort((a, b) => {
       // 1) Confidence score DESC, 2) price ASC.
       const sa = a.confidenceScore ?? 0;
       const sb = b.confidenceScore ?? 0;
       if (sb !== sa) return sb - sa;
       return a.offers[0].price - b.offers[0].price;
-    }).slice(0, 30);
+    })
+    .slice(0, 30);
 }
