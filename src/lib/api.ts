@@ -36,6 +36,8 @@ export interface Product {
   offers: StoreOffer[];
   isRefurbished?: boolean; isVariant?: boolean;
   confidenceScore?: number;
+  /** Extracted storage tier, e.g. "128GB" or "1TB". Empty when unknown. */
+  storage?: string;
 }
 
 export interface StoreSearchResult {
