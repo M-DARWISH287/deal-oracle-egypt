@@ -36,6 +36,8 @@ export interface Product {
   offers: StoreOffer[];
   isRefurbished?: boolean; isVariant?: boolean;
   confidenceScore?: number;
+  /** Extracted storage tier, e.g. "128GB" or "1TB". Empty when unknown. */
+  storage?: string;
 }
 
 export interface StoreSearchResult {
@@ -273,10 +275,18 @@ function deepCloneProduct(p: Product): Product {
   return { ...p, name: { ...p.name }, specs: { ...p.specs }, offers: p.offers.map(o => ({ ...o })) };
 }
 
-// ── Title normalization for strict product grouping ──
-// Extracts brand + model + storage from a raw title so that offers from
-// different stores collapse into ONE group only when they describe the
-// exact same SKU (same model + same storage). Color is intentionally ignored.
+// ════════════════════════════════════════════════════════════════════
+// PRODUCT GROUPING
+// ────────────────────────────────────────────────────────────────────
+// Strict, production-safe grouping by (brand + model + storage).
+// Color and RAM are intentionally ignored. Different storage tiers
+// (128GB vs 256GB) ALWAYS render as separate cards. Offers without a
+// detectable storage are grouped under a `nostorage` bucket UNLESS that
+// bucket would mix with a known-storage bucket for the same model — in
+// which case we split them apart (smart merge / split rule).
+// ════════════════════════════════════════════════════════════════════
+
+// ── Brand patterns ──
 const BRAND_PATTERNS: Array<{ re: RegExp; brand: string }> = [
   { re: /\bapple\b|\biphone\b|\bipad\b|\bmacbook\b|\bairpods?\b/i, brand: 'apple' },
   { re: /\bsamsung\b|\bgalaxy\b/i, brand: 'samsung' },
@@ -298,83 +308,170 @@ const BRAND_PATTERNS: Array<{ re: RegExp; brand: string }> = [
   { re: /\blg\b/i, brand: 'lg' },
 ];
 
+// Pretty brand labels for the canonical product name.
+const BRAND_LABELS: Record<string, string> = {
+  apple: 'Apple', samsung: 'Samsung', xiaomi: 'Xiaomi', huawei: 'Huawei',
+  oppo: 'OPPO', vivo: 'Vivo', realme: 'Realme', infinix: 'Infinix',
+  tecno: 'Tecno', sony: 'Sony', microsoft: 'Microsoft', nintendo: 'Nintendo',
+  dell: 'Dell', hp: 'HP', lenovo: 'Lenovo', asus: 'ASUS', acer: 'Acer', lg: 'LG',
+};
+
+// ── Pattern-based model extractors (priority order) ──
+// Each returns a normalized model string (lowercase, brand kept) or null.
+const MODEL_EXTRACTORS: Array<(raw: string) => string | null> = [
+  // iPhone: "iphone 15 pro max", "iphone 15 pro", "iphone 15 plus", "iphone se"
+  (raw) => {
+    const m = raw.match(/iphone\s*(se|\d{1,2})\s*(pro\s*max|pro|plus|max|mini)?/i);
+    if (!m) return null;
+    const num = m[1].toLowerCase();
+    const variant = m[2] ? ' ' + m[2].toLowerCase().replace(/\s+/g, ' ') : '';
+    return `iphone ${num}${variant}`.trim();
+  },
+  // iPad: "ipad pro 11", "ipad air", "ipad mini 6"
+  (raw) => {
+    const m = raw.match(/ipad\s*(pro|air|mini)?\s*(\d{1,2})?/i);
+    if (!m) return null;
+    const variant = m[1] ? ' ' + m[1].toLowerCase() : '';
+    const num = m[2] ? ' ' + m[2] : '';
+    return `ipad${variant}${num}`.trim();
+  },
+  // MacBook: "macbook pro 14", "macbook air m2"
+  (raw) => {
+    const m = raw.match(/macbook\s*(pro|air)?\s*(\d{1,2})?\s*(m\d)?/i);
+    if (!m) return null;
+    const variant = m[1] ? ' ' + m[1].toLowerCase() : '';
+    const size = m[2] ? ' ' + m[2] : '';
+    const chip = m[3] ? ' ' + m[3].toLowerCase() : '';
+    return `macbook${variant}${size}${chip}`.trim();
+  },
+  // Samsung Galaxy: "galaxy s24 ultra", "galaxy a54", "galaxy z fold 5", "galaxy note 20"
+  (raw) => {
+    const m = raw.match(/galaxy\s*(z\s*fold|z\s*flip|note|s|a|m|f|tab)\s*(\d{1,3})\s*(ultra|plus|fe|\+)?/i);
+    if (!m) return null;
+    const series = m[1].toLowerCase().replace(/\s+/g, ' ');
+    const num = m[2];
+    const variant = m[3] ? ' ' + m[3].toLowerCase().replace('+', 'plus') : '';
+    return `galaxy ${series}${num}${variant}`.trim();
+  },
+  // Xiaomi Redmi / Mi / Poco: "redmi note 13 pro", "poco x6", "mi 11"
+  (raw) => {
+    const m = raw.match(/(redmi|poco|mi)\s*(note|k)?\s*(\d{1,3})\s*(pro\s*plus|pro|ultra|\+)?/i);
+    if (!m) return null;
+    const series = m[1].toLowerCase();
+    const sub = m[2] ? ' ' + m[2].toLowerCase() : '';
+    const num = m[3];
+    const variant = m[4] ? ' ' + m[4].toLowerCase().replace('+', 'plus').replace(/\s+/g, ' ') : '';
+    return `${series}${sub} ${num}${variant}`.trim();
+  },
+  // PlayStation / Xbox / Switch
+  (raw) => {
+    const m = raw.match(/\b(ps5|ps4|playstation\s*\d|xbox\s*(series\s*[xs]|one)|nintendo\s*switch(?:\s*oled|\s*lite)?)\b/i);
+    return m ? m[0].toLowerCase().replace(/\s+/g, ' ') : null;
+  },
+];
+
 interface NormalizedTitle {
-  brand: string;        // e.g. "apple" or "" if unknown
-  model: string;        // e.g. "iphone 15 pro" or first 2-4 distinguishing tokens
-  storage: string;      // e.g. "128gb" or "" if missing
-  raw: string;          // lowercased cleaned title (for fallback comparisons)
+  brand: string;        // e.g. "apple"
+  model: string;        // e.g. "iphone 15 pro max" — brand-prefix kept where natural
+  storage: string;      // e.g. "128gb" or "1tb" — empty if missing
+  raw: string;          // cleaned lowercased title (for fallbacks)
 }
 
-function normalizeTitle(title: string): NormalizedTitle {
+export function normalizeTitle(title: string): NormalizedTitle {
   const raw = (title || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-  // Brand
+  // ── Brand ──
   let brand = '';
   for (const { re, brand: b } of BRAND_PATTERNS) {
     if (re.test(raw)) { brand = b; break; }
   }
 
-  // Storage — only count units that match real storage tiers, ignore RAM-only tokens.
-  // Match "128 gb", "128gb", "1 tb", "1tb"; skip values < 16gb (likely RAM).
+  // ── Storage ── pick LARGEST valid storage tier. RAM (< 32GB) is ignored.
   let storage = '';
-  const storageMatches = Array.from(raw.matchAll(/(\d+(?:\.\d+)?)\s*(tb|gb)\b/g));
-  // Prefer the LARGEST storage-looking value (RAM is usually 4/6/8/12/16; storage is 64/128/256/512/1024).
-  let bestVal = 0;
-  for (const m of storageMatches) {
+  let bestGB = 0;
+  for (const m of raw.matchAll(/(\d+(?:\.\d+)?)\s*(tb|gb)\b/g)) {
     const n = parseFloat(m[1]);
     const unit = m[2];
     const gb = unit === 'tb' ? n * 1024 : n;
-    if (gb >= 32 && gb > bestVal) {
-      bestVal = gb;
+    if (gb >= 32 && gb > bestGB) {
+      bestGB = gb;
       storage = unit === 'tb' ? `${n}tb` : `${Math.round(n)}gb`;
     }
   }
 
-  // Model: strip brand + storage + common noise, then keep first ~4 tokens.
-  let modelSrc = raw
-    .replace(/\((.*?)\)/g, ' ')                               // drop parentheticals
-    .replace(/\b\d+(?:\.\d+)?\s*(?:tb|gb|mb)\b/g, ' ')         // drop storage tokens
-    .replace(/\b\d+\s*(?:hz|w|mah|mp|inch|"|''|cm|mm)\b/g, ' ') // drop spec units
-    .replace(/\b(black|white|blue|red|green|gold|silver|gray|grey|pink|purple|titanium|graphite|midnight|starlight|natural|space|rose|yellow|orange|أسود|أبيض|أزرق|أحمر|أخضر|ذهبي|فضي)\b/g, ' ')
-    .replace(/\b(new|brand|original|sealed|unlocked|dual|sim|5g|4g|lte|wifi|with|and|the|for|smartphone|mobile|phone|laptop|tablet)\b/g, ' ')
-    .replace(/[^\w\s\-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (brand) modelSrc = modelSrc.replace(new RegExp(`\\b${brand}\\b`, 'g'), ' ').replace(/\s+/g, ' ').trim();
+  // ── Model ── pattern-first extraction; brand is intentionally kept.
+  let model = '';
+  for (const extract of MODEL_EXTRACTORS) {
+    const m = extract(raw);
+    if (m) { model = m; break; }
+  }
 
-  const tokens = modelSrc.split(' ').filter(Boolean).slice(0, 5);
-  const model = tokens.join(' ');
+  // Fallback: strip noise words and keep first 3-5 meaningful tokens. Brand stays.
+  if (!model) {
+    const cleaned = raw
+      .replace(/\((.*?)\)/g, ' ')
+      .replace(/\b\d+(?:\.\d+)?\s*(?:tb|gb|mb)\b/g, ' ')
+      .replace(/\b\d+\s*(?:hz|w|mah|mp|inch|"|''|cm|mm)\b/g, ' ')
+      .replace(/\b(black|white|blue|red|green|gold|silver|gray|grey|pink|purple|titanium|graphite|midnight|starlight|natural|space|rose|yellow|orange|أسود|أبيض|أزرق|أحمر|أخضر|ذهبي|فضي)\b/g, ' ')
+      .replace(/\b(new|brand|original|sealed|unlocked|dual|sim|5g|4g|lte|wifi|with|and|the|for|smartphone|mobile|phone|laptop|tablet)\b/g, ' ')
+      .replace(/[^\w\s\-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    model = cleaned.split(' ').filter(Boolean).slice(0, 5).join(' ');
+  }
 
   return { brand, model, storage, raw };
 }
 
-// Stable group key: brand_model_storage. If storage is missing, suffix with the URL
-// so the offer is NOT merged into a group whose storage we DO know — preventing
-// 128GB and 256GB (or unknown) from being compared as the same SKU.
+// ── Group key ──
+// brand_model_storage  (or _nostorage when missing). The smart-split pass
+// later removes the nostorage bucket if a known-storage bucket exists for
+// the same brand+model.
 function buildGroupKey(n: NormalizedTitle, fallbackId: string): string {
   if (!n.brand && !n.model) return `unknown_${fallbackId}`;
-  if (!n.storage) return `${n.brand}_${n.model}_nostorage_${fallbackId}`;
-  return `${n.brand}_${n.model}_${n.storage}`;
+  const base = `${n.brand}_${n.model}`.replace(/\s+/g, '-');
+  return n.storage ? `${base}_${n.storage}` : `${base}_nostorage`;
 }
 
-// Pick the canonical image for a group. Priority:
-//   1) image already assigned to the group, 2) Amazon Egypt offer image,
-//   3) first non-empty offer image. We track per-store images on the group
-//   via a side-map kept on the Product object (non-enumerable would be nicer
-//   but we just store on a known field).
-interface ProductWithImageMap extends Product {
+// ── Canonical product name ──
+// "Apple iPhone 15 Pro Max 256GB" — capitalized brand, detected model, optional storage suffix.
+export function buildCanonicalName(n: NormalizedTitle): string {
+  const brandLabel = BRAND_LABELS[n.brand] || (n.brand ? n.brand.charAt(0).toUpperCase() + n.brand.slice(1) : '');
+  // Title-case model tokens. Keep "M2", "Pro Max", "Ultra" naturally.
+  const model = n.model
+    .split(' ')
+    .map(tok => tok.length <= 2 ? tok.toUpperCase() : tok.charAt(0).toUpperCase() + tok.slice(1))
+    .join(' ');
+  const storage = n.storage ? n.storage.toUpperCase() : '';
+
+  // Avoid duplicating the brand if the model already starts with it (e.g. "iphone …" under apple).
+  const modelLower = model.toLowerCase();
+  const includesBrandWord = n.brand === 'apple'
+    ? /^(iphone|ipad|macbook|airpods)\b/i.test(modelLower)
+    : n.brand === 'samsung'
+      ? /^galaxy\b/i.test(modelLower)
+      : n.brand === 'sony'
+        ? /^(playstation|ps\d|xbox)\b/i.test(modelLower)
+        : false;
+  const head = includesBrandWord ? `${brandLabel} ${model}` : [brandLabel, model].filter(Boolean).join(' ');
+  return [head, storage].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// ── Image picker ── stable, never tied to cheapest offer.
+interface ProductWithMeta extends Product {
   _imagesByStore?: Record<string, string>;
+  _norm?: NormalizedTitle;
 }
-
-function pickGroupImage(group: ProductWithImageMap): string {
+function pickGroupImage(group: ProductWithMeta): string {
   if (group.image) return group.image;
   const map = group._imagesByStore || {};
   return map['Amazon Egypt'] || Object.values(map).find(Boolean) || '';
 }
 
 export function groupProducts(allProducts: RawProduct[]): Product[] {
-  const grouped = new Map<string, ProductWithImageMap>();
+  const grouped = new Map<string, ProductWithMeta>();
 
+  // ── Pass 1: bucket by group key ──
   for (const p of allProducts) {
     if (!p.price || p.price <= 0) continue;
     const norm = normalizeTitle(p.name || '');
@@ -384,14 +481,16 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
     if (!group) {
       group = {
         id: crypto.randomUUID(),
-        name: { en: p.name || '', ar: p.name_ar || p.name || '' },
+        name: { en: '', ar: '' },
         specs: { en: p.specs || '', ar: p.specs || '' },
         image: '',
         category: 'electronics',
         offers: [],
         isRefurbished: p.isRefurbished || false,
         confidenceScore: p.confidenceScore ?? 0,
+        storage: norm.storage ? norm.storage.toUpperCase() : '',
         _imagesByStore: {},
+        _norm: norm,
       };
       grouped.set(key, group);
     }
@@ -405,21 +504,43 @@ export function groupProducts(allProducts: RawProduct[]): Product[] {
     if ((p.confidenceScore ?? 0) > (group.confidenceScore ?? 0)) {
       group.confidenceScore = p.confidenceScore;
     }
-    // Prefer a title that contains the storage signal as the canonical display name.
-    if (norm.storage && !/\d+\s*(?:tb|gb)\b/i.test(group.name.en)) {
-      group.name = { en: p.name || group.name.en, ar: p.name_ar || p.name || group.name.ar };
+  }
+
+  // ── Pass 2: smart split — drop the `_nostorage` bucket when a sibling
+  // with the same brand+model has a known storage. We never silently merge
+  // unknown into known, but we also avoid a permanent dangling "no storage"
+  // bucket polluting the UI for already-resolved products.
+  const knownStorageBases = new Set<string>();
+  for (const key of grouped.keys()) {
+    if (!key.endsWith('_nostorage') && !key.startsWith('unknown_')) {
+      knownStorageBases.add(key.replace(/_[^_]+$/, ''));
+    }
+  }
+  for (const key of Array.from(grouped.keys())) {
+    if (key.endsWith('_nostorage')) {
+      const base = key.replace(/_nostorage$/, '');
+      if (knownStorageBases.has(base)) grouped.delete(key);
     }
   }
 
+  // ── Pass 3: finalize each group ──
   return Array.from(grouped.values())
     .map(p => {
       p.image = pickGroupImage(p);
+      const canonical = p._norm ? buildCanonicalName(p._norm) : '';
+      if (canonical) {
+        p.name = { en: canonical, ar: canonical };
+      } else {
+        // Fallback: use the longest offer title we saw — better than empty.
+        const fallback = allProducts.find(rp => p.offers.some(o => o.url === rp.url))?.name || '';
+        p.name = { en: fallback, ar: fallback };
+      }
       delete p._imagesByStore;
+      delete p._norm;
       p.offers.sort((a, b) => a.price - b.price);
       return p as Product;
     })
     .sort((a, b) => {
-      // 1) Confidence score DESC, 2) price ASC.
       const sa = a.confidenceScore ?? 0;
       const sb = b.confidenceScore ?? 0;
       if (sb !== sa) return sb - sa;
