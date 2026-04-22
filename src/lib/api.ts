@@ -263,7 +263,10 @@ export function clientFilterWithFallback(
 
     let passesIntent = true;
     for (const v of variants) {
-      if (!q.includes(v) && name.includes(v)) { passesIntent = false; break; }
+      // Word-boundary check on BOTH sides — substring matching causes false drops
+      // (e.g. "fe" inside "feature", "mini" inside "aluminium").
+      const re = new RegExp(`\\b${v}\\b`, 'i');
+      if (!re.test(q) && re.test(name)) { passesIntent = false; break; }
     }
     if (passesIntent && queryNumbers.length > 0) {
       const nameNumbers: string[] = name.match(/\d+/g) || [];
