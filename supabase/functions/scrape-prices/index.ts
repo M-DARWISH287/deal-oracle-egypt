@@ -236,8 +236,13 @@ const BRAND_EXCLUSIONS: Record<string, string[]> = {
 
 function matchesIntent(query: string, productName: string): boolean {
   const q = query.toLowerCase(); const n = productName.toLowerCase()
-  if (!q.includes('max') && !q.includes('ultra')) {
-    if (n.includes('pro max') || n.includes('ultra')) return false
+  // Cross-model protection: drop variant suffixes the user did NOT ask for.
+  // Word-boundary required — substring "fe"/"mini"/"lite" matches inside
+  // legitimate words ("feature", "aluminium", "elite").
+  const VARIANTS = ['pro max', 'ultra', 'mini', 'fe', 'lite', 'plus'] as const
+  for (const v of VARIANTS) {
+    const re = new RegExp(`\\b${v}\\b`, 'i')
+    if (!re.test(q) && re.test(n)) return false
   }
   for (const [brandKw, excluded] of Object.entries(BRAND_EXCLUSIONS)) {
     if (q.includes(brandKw)) {

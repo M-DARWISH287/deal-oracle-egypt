@@ -131,12 +131,19 @@ const BRAND_EXCLUSIONS: Record<string, string[]> = {
 };
 
 const ACCESSORY_KEYWORDS_CLIENT = [
-  'case', 'cover', 'protector', 'screen protector', 'tempered glass',
-  'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
+  // Pure accessory phrases only — never bare 'case'/'cover' as substrings
+  // (substring match on those produces false positives like "showcase",
+  // "coverage"). Bare case/cover are caught by ACCESSORY_REGEX_CLIENT below.
+  'protector', 'screen protector', 'tempered glass',
+  'cable', 'charger', 'adapter', 'holder',
   'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
   'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
-  'film', 'lens protector', 'camera protector',
+  'lens protector', 'camera protector',
 ];
+
+// Word-boundary regex mirrors the server (supabase/functions/scrape-prices/index.ts).
+// Catches phrasings like "Wallet Case,Black" / "Flip Cover" without false positives.
+const ACCESSORY_REGEX_CLIENT = /\b(case|cover|wallet case|flip cover|back cover|skin)\b/i;
 
 // ── GLOBAL RELEVANCE VALIDATOR (client mirror of the edge-function rules) ──
 // Generic, brand-agnostic. Strict numeric matching, ≥60% non-numeric token overlap.
@@ -199,7 +206,10 @@ export function clientFilterWithFallback(
   products: Product[], query: string
 ): { strict: Product[]; relaxed: Product[] } {
   const q = query.toLowerCase();
-  const variants = ['pro', 'max', 'plus', 'ultra'] as const;
+  // Cross-model protection: if the query does NOT mention these suffixes, drop
+  // products whose title does. Prevents "iPhone 14" matching "iPhone 14 Mini",
+  // "Samsung S24" matching "S24 FE", "MacBook Air" matching "MacBook Air Lite", etc.
+  const variants = ['pro', 'max', 'plus', 'ultra', 'mini', 'fe', 'lite'] as const;
   const queryNumbers = q.match(/\d+/g) || [];
   const strict: Product[] = [];
   const relaxed: Product[] = [];
@@ -211,7 +221,8 @@ export function clientFilterWithFallback(
 
     const nameLower = (clone.name.en + ' ' + clone.name.ar).toLowerCase();
 
-    // Drop accessories
+    // Drop accessories — regex first (word-boundary case/cover), then phrase list.
+    if (ACCESSORY_REGEX_CLIENT.test(nameLower)) continue;
     if (ACCESSORY_KEYWORDS_CLIENT.some(kw => nameLower.includes(kw))) continue;
 
     // GLOBAL RELEVANCE GATE — reject anything whose title doesn't match the query.
@@ -252,7 +263,10 @@ export function clientFilterWithFallback(
 
     let passesIntent = true;
     for (const v of variants) {
-      if (!q.includes(v) && name.includes(v)) { passesIntent = false; break; }
+      // Word-boundary check on BOTH sides — substring matching causes false drops
+      // (e.g. "fe" inside "feature", "mini" inside "aluminium").
+      const re = new RegExp(`\\b${v}\\b`, 'i');
+      if (!re.test(q) && re.test(name)) { passesIntent = false; break; }
     }
     if (passesIntent && queryNumbers.length > 0) {
       const nameNumbers: string[] = name.match(/\d+/g) || [];
