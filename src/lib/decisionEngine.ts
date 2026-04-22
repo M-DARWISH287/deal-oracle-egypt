@@ -161,7 +161,30 @@ export interface CheapestWinnerResult {
     totalProducts: number;
     storesInWinner: string[];
     winnerCheapestPrice: number | null;
+    rejectedFromHero: number;       // products skipped because they failed the safety gate
   };
+}
+
+// ── BEST-DEAL SAFETY GATE ──
+// Per "Best Deal Safety Check" contract: a product can be crowned hero ONLY if
+// every cheapest-offer signal is sane. Failing the gate doesn't drop the product
+// from the result set — it just makes it ineligible for the hero slot, so the
+// next-cheapest valid product takes its place. Defensive only: upstream filters
+// already drop most junk, but this is the last line of defense.
+const HERO_PRICE_FLOOR = 1500;
+const ALLOWED_HERO_HOSTS = ['amazon.eg', 'noon.com', 'jumia.com.eg', 'btech.com', '2b.com.eg'];
+function isSafeForHero(product: Product, cheapestOffer: StoreOffer | undefined): boolean {
+  if (!cheapestOffer) return false;
+  // Price must be present and above the floor.
+  if (!Number.isFinite(cheapestOffer.price) || cheapestOffer.price < HERO_PRICE_FLOOR) return false;
+  // URL must parse and resolve to a whitelisted store host.
+  try {
+    const host = new URL(cheapestOffer.url).hostname.toLowerCase();
+    if (!ALLOWED_HERO_HOSTS.some(d => host === d || host.endsWith(`.${d}`))) return false;
+  } catch { return false; }
+  // Product must have a usable canonical name (not just an empty fallback).
+  if (!product.name?.en?.trim() && !product.name?.ar?.trim()) return false;
+  return true;
 }
 
 export function pickCheapestWinner(products: Product[]): CheapestWinnerResult {
@@ -176,6 +199,7 @@ export function pickCheapestWinner(products: Product[]): CheapestWinnerResult {
         totalProducts: 0,
         storesInWinner: [],
         winnerCheapestPrice: null,
+        rejectedFromHero: 0,
       },
     };
   }
@@ -189,20 +213,51 @@ export function pickCheapestWinner(products: Product[]): CheapestWinnerResult {
     return (b.confidenceScore ?? 0) - (a.confidenceScore ?? 0);
   });
 
-  const winner = sorted[0];
+  // Walk the sorted list and pick the first product whose cheapest offer passes
+  // the hero-safety gate. Rejected products still appear in `others` so users
+  // can see them in "More results" — they just can't be crowned Best Deal.
+  let winnerIdx = -1;
+  let rejectedFromHero = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const cand = sorted[i];
+    const candCheapest = [...cand.offers].sort((a, b) => a.price - b.price)[0];
+    if (isSafeForHero(cand, candCheapest)) { winnerIdx = i; break; }
+    rejectedFromHero++;
+  }
+
+  if (winnerIdx === -1) {
+    // Nothing is safe to crown — return all products under "others", no hero.
+    return {
+      bestProduct: null,
+      cheapestOffer: null,
+      priceComparison: [],
+      others: sorted,
+      pipelineTrace: {
+        rankingMethod: 'cheapest_wins',
+        totalProducts: products.length,
+        storesInWinner: [],
+        winnerCheapestPrice: null,
+        rejectedFromHero,
+      },
+    };
+  }
+
+  const winner = sorted[winnerIdx];
   const priceComparison = [...winner.offers].sort((a, b) => a.price - b.price);
   const cheapestOffer = priceComparison[0];
+  const others = [...sorted.slice(0, winnerIdx), ...sorted.slice(winnerIdx + 1)];
 
   return {
     bestProduct: winner,
     cheapestOffer,
     priceComparison,
-    others: sorted.slice(1),
+    others,
     pipelineTrace: {
       rankingMethod: 'cheapest_wins',
       totalProducts: products.length,
       storesInWinner: Array.from(new Set(priceComparison.map(o => o.store))),
       winnerCheapestPrice: cheapestOffer?.price ?? null,
+      rejectedFromHero,
     },
   };
 }
