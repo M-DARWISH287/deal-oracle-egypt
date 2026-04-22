@@ -131,12 +131,19 @@ const BRAND_EXCLUSIONS: Record<string, string[]> = {
 };
 
 const ACCESSORY_KEYWORDS_CLIENT = [
-  'case', 'cover', 'protector', 'screen protector', 'tempered glass',
-  'cable', 'charger', 'adapter', 'holder', 'stand', 'mount',
+  // Pure accessory phrases only — never bare 'case'/'cover' as substrings
+  // (substring match on those produces false positives like "showcase",
+  // "coverage"). Bare case/cover are caught by ACCESSORY_REGEX_CLIENT below.
+  'protector', 'screen protector', 'tempered glass',
+  'cable', 'charger', 'adapter', 'holder',
   'جراب', 'كفر', 'شاحن', 'كابل', 'حامل', 'واقي شاشة', 'سكرين', 'حماية',
   'earphone', 'earbuds', 'headset', 'strap', 'band', 'pouch', 'sleeve',
-  'film', 'lens protector', 'camera protector',
+  'lens protector', 'camera protector',
 ];
+
+// Word-boundary regex mirrors the server (supabase/functions/scrape-prices/index.ts).
+// Catches phrasings like "Wallet Case,Black" / "Flip Cover" without false positives.
+const ACCESSORY_REGEX_CLIENT = /\b(case|cover|wallet case|flip cover|back cover|skin)\b/i;
 
 // ── GLOBAL RELEVANCE VALIDATOR (client mirror of the edge-function rules) ──
 // Generic, brand-agnostic. Strict numeric matching, ≥60% non-numeric token overlap.
