@@ -218,7 +218,8 @@ export function clientFilterWithFallback(
 
     const nameLower = (clone.name.en + ' ' + clone.name.ar).toLowerCase();
 
-    // Drop accessories
+    // Drop accessories — regex first (word-boundary case/cover), then phrase list.
+    if (ACCESSORY_REGEX_CLIENT.test(nameLower)) continue;
     if (ACCESSORY_KEYWORDS_CLIENT.some(kw => nameLower.includes(kw))) continue;
 
     // GLOBAL RELEVANCE GATE — reject anything whose title doesn't match the query.
