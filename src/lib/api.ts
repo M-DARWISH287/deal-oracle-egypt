@@ -206,7 +206,10 @@ export function clientFilterWithFallback(
   products: Product[], query: string
 ): { strict: Product[]; relaxed: Product[] } {
   const q = query.toLowerCase();
-  const variants = ['pro', 'max', 'plus', 'ultra'] as const;
+  // Cross-model protection: if the query does NOT mention these suffixes, drop
+  // products whose title does. Prevents "iPhone 14" matching "iPhone 14 Mini",
+  // "Samsung S24" matching "S24 FE", "MacBook Air" matching "MacBook Air Lite", etc.
+  const variants = ['pro', 'max', 'plus', 'ultra', 'mini', 'fe', 'lite'] as const;
   const queryNumbers = q.match(/\d+/g) || [];
   const strict: Product[] = [];
   const relaxed: Product[] = [];
