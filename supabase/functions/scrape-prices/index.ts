@@ -787,7 +787,7 @@ async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<Ra
 // CRITICAL FIX: extractLowestPrice now strips .old-price / <s> / <del> nodes
 // BEFORE collecting price candidates → the crossed-out original price is gone,
 // only the active discount survives, and Math.min picks the lowest.
-async function scrape2B(query: string): Promise<RawProduct[]> {
+async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProduct[]> {
   try {
     const mobileQuery = `${query} smartphone`
     const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(mobileQuery)}`
