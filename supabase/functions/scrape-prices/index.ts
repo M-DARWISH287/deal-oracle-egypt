@@ -632,8 +632,15 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
     const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}${pageParam}`
     const headers = stage === 2 ? STEALTH_HEADERS_ALT : undefined
     const res = await fetchWithTimeout(url, headers ? { headers } : {})
+    if (res.status === 403 || res.status === 503 || res.status === 429) {
+      throw new Error(`BLOCKED: HTTP ${res.status} from jumia.com.eg (Cloudflare challenge)`)
+    }
     if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     const html = await res.text()
+    // Cloudflare interstitial — "Just a moment..." challenge page.
+    if (/Just a moment\.\.\./i.test(html) || /cf-challenge-running/i.test(html) || /id="challenge-error-text"/i.test(html)) {
+      throw new Error('BLOCKED: Jumia Cloudflare challenge page')
+    }
 
     // ── STREAMING extraction with EARLY FALLBACK GATE ──
     // Walk articles one at a time, filter per-node. After scanning the first
@@ -711,8 +718,15 @@ async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<Ra
       : `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
     const headers = stage === 2 ? STEALTH_HEADERS_ALT : STEALTH_HEADERS
     const res = await fetchWithTimeout(baseUrl, { headers }, 10000)
+    if (res.status === 503 || res.status === 403 || res.status === 429) {
+      throw new Error(`BLOCKED: HTTP ${res.status} from amazon.eg (anti-bot / IP block)`)
+    }
     if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     let html = await res.text()
+    // Amazon CAPTCHA pages contain a /errors/validateCaptcha form. Detect and signal.
+    if (/\/errors\/validateCaptcha/i.test(html) || /Enter the characters you see below/i.test(html)) {
+      throw new Error('BLOCKED: Amazon CAPTCHA page returned')
+    }
 
     // ── STRIP SPONSORED CONTENT before parsing ──
     // Amazon's sponsored cards are noisy and often off-topic. Remove the labels and
@@ -911,6 +925,7 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
 
   // Up to 1 + NOON_MAX_RETRIES attempts with exponential backoff (200ms, 500ms).
   let html: string | null = null
+  let blocked = false
   for (let attempt = 0; attempt <= NOON_MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       const backoff = Math.min(500, 200 * 2 ** (attempt - 1))
@@ -918,6 +933,13 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
     }
     const res = await fetchNoonOnce(url, attempt)
     if (!res) continue
+    if (res.status === 403) {
+      // Akamai datacenter block — retrying won't help, but we let the loop finish
+      // so the LAST attempt's body can be inspected for Access Denied confirmation.
+      blocked = true
+      try { html = await res.text() } catch { /* ignore */ }
+      break
+    }
     if (res.status === 429 || res.status >= 500) {
       console.log(`[${tag}] attempt ${attempt + 1} HTTP ${res.status} — retrying`)
       continue
@@ -930,6 +952,9 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
       console.warn(`[${tag}] body read failed:`, err)
       continue
     }
+  }
+  if (blocked || (html && /<TITLE>Access Denied<\/TITLE>/i.test(html))) {
+    throw new Error('BLOCKED: Noon Akamai 403 / Access Denied (datacenter IP)')
   }
   if (!html) { console.warn(`[${tag}] all ${NOON_MAX_RETRIES + 1} attempts failed`); return [] }
 
