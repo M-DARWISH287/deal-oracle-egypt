@@ -1,1 +1,4 @@
 project_id = "guynfpxitlwzndninzfo"
+
+[functions.firecrawl-benchmark]
+verify_jwt = false
