@@ -51,9 +51,16 @@ const STORE_TIMEOUT_MS = 15000
 // "complete" results in 60s. Per-store timeouts derived from the global budget.
 // Tuned against live benchmark: Amazon/Jumia HTML averages 2.5s, B.TECH ~2s,
 // Noon ~2s, 2B HTML ~3-4s. Stage 1 cap of 4.5s catches the long tail.
-const STAGE1_TIMEOUT_MS = 4500
+// PHASE-3 RULE: max 5 seconds per store. Stage 1 is the only stage that runs
+// (Stage 2/RETRY disabled, Stage 3/FIRECRAWL disabled), so this is the per-store cap.
+const STAGE1_TIMEOUT_MS = 5000
 const STAGE2_TIMEOUT_MS = 0       // RETRY DISABLED — 6s budget cannot afford a second native attempt
 const FIRECRAWL_TIMEOUT_MS = 5000 // hard ceiling (was 90s — main latency offender)
+// PHASE-3 HARD RULE (Big-5 stabilization): No Firecrawl fallback, no retry loops.
+// Each store gets ONE native attempt within its per-store timeout, then we exit.
+// If a store cannot deliver (blocked, empty, error) we surface that status so the
+// UI can reflect partial success instead of waiting on doomed retries.
+const FIRECRAWL_FALLBACK_ENABLED = false
 // Global budget per request (Part 10): if pipeline exceeds this, we stop and return what we have.
 const MAX_TOTAL_MS = 6000
 
@@ -121,6 +128,7 @@ type FallbackReason =
   | 'CREDIT_LIMIT'
   | 'KEY_MISSING'
   | 'BUDGET_EXHAUSTED'
+  | 'BLOCKED'
   | 'NONE'
 
 // Internal stage outcome carrying the reason so the orchestrator can decide
@@ -147,7 +155,13 @@ async function raceWithTimeoutTraced<T>(
     }
     return { products, failure: products.length === 0 ? 'EMPTY_RESULT' : null }
   } catch (err) {
-    console.error(`[${label}] threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
+    const msg = err instanceof Error ? err.message : String(err)
+    // Scrapers signal anti-bot blocks by throwing `BLOCKED: <reason>`.
+    if (msg.startsWith('BLOCKED:')) {
+      console.warn(`[${label}] BLOCKED — ${msg.slice(8).trim()}`)
+      return { products: [], failure: 'BLOCKED' }
+    }
+    console.error(`[${label}] threw — NATIVE_ERROR:`, msg)
     return { products: [], failure: 'NATIVE_ERROR' }
   }
 }
@@ -592,7 +606,10 @@ async function scrapeBTech(query: string, stage: ScrapeStage = 1): Promise<RawPr
       name: String(it.title),
       name_ar: String(it.title),
       price: it.price?.final_float_price || it.price?.final || it.price?.base || '',
-      url: `https://btech.com/en/${it.slug}`,
+      // B.TECH PDP URLs are Magento-style with a trailing `.html`. The bare slug
+      // path under /en/ returns 404 in production (verified live: /en/<slug> → 404,
+      // /en/<slug>.html → 200). The .html suffix is the only reliable form.
+      url: `https://btech.com/en/${it.slug}.html`,
       image: it.main_image ? `${BTECH_CDN_BASE}${it.main_image}` : '',
       specs: (it.categories_tree || []).join(' › '),
       store: 'B.TECH',
@@ -617,8 +634,15 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
     const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}${pageParam}`
     const headers = stage === 2 ? STEALTH_HEADERS_ALT : undefined
     const res = await fetchWithTimeout(url, headers ? { headers } : {})
+    if (res.status === 403 || res.status === 503 || res.status === 429) {
+      throw new Error(`BLOCKED: HTTP ${res.status} from jumia.com.eg (Cloudflare challenge)`)
+    }
     if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     const html = await res.text()
+    // Cloudflare interstitial — "Just a moment..." challenge page.
+    if (/Just a moment\.\.\./i.test(html) || /cf-challenge-running/i.test(html) || /id="challenge-error-text"/i.test(html)) {
+      throw new Error('BLOCKED: Jumia Cloudflare challenge page')
+    }
 
     // ── STREAMING extraction with EARLY FALLBACK GATE ──
     // Walk articles one at a time, filter per-node. After scanning the first
@@ -696,8 +720,15 @@ async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<Ra
       : `https://www.amazon.eg/s?k=${encodeURIComponent(query)}&i=electronics&rh=n%3A21832883031&language=en_AE`
     const headers = stage === 2 ? STEALTH_HEADERS_ALT : STEALTH_HEADERS
     const res = await fetchWithTimeout(baseUrl, { headers }, 10000)
+    if (res.status === 503 || res.status === 403 || res.status === 429) {
+      throw new Error(`BLOCKED: HTTP ${res.status} from amazon.eg (anti-bot / IP block)`)
+    }
     if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     let html = await res.text()
+    // Amazon CAPTCHA pages contain a /errors/validateCaptcha form. Detect and signal.
+    if (/\/errors\/validateCaptcha/i.test(html) || /Enter the characters you see below/i.test(html)) {
+      throw new Error('BLOCKED: Amazon CAPTCHA page returned')
+    }
 
     // ── STRIP SPONSORED CONTENT before parsing ──
     // Amazon's sponsored cards are noisy and often off-topic. Remove the labels and
@@ -772,7 +803,7 @@ async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<Ra
 // CRITICAL FIX: extractLowestPrice now strips .old-price / <s> / <del> nodes
 // BEFORE collecting price candidates → the crossed-out original price is gone,
 // only the active discount survives, and Math.min picks the lowest.
-async function scrape2B(query: string): Promise<RawProduct[]> {
+async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProduct[]> {
   try {
     const mobileQuery = `${query} smartphone`
     const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(mobileQuery)}`
@@ -896,6 +927,7 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
 
   // Up to 1 + NOON_MAX_RETRIES attempts with exponential backoff (200ms, 500ms).
   let html: string | null = null
+  let blocked = false
   for (let attempt = 0; attempt <= NOON_MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       const backoff = Math.min(500, 200 * 2 ** (attempt - 1))
@@ -903,6 +935,13 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
     }
     const res = await fetchNoonOnce(url, attempt)
     if (!res) continue
+    if (res.status === 403) {
+      // Akamai datacenter block — retrying won't help, but we let the loop finish
+      // so the LAST attempt's body can be inspected for Access Denied confirmation.
+      blocked = true
+      try { html = await res.text() } catch { /* ignore */ }
+      break
+    }
     if (res.status === 429 || res.status >= 500) {
       console.log(`[${tag}] attempt ${attempt + 1} HTTP ${res.status} — retrying`)
       continue
@@ -915,6 +954,9 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
       console.warn(`[${tag}] body read failed:`, err)
       continue
     }
+  }
+  if (blocked || (html && /<TITLE>Access Denied<\/TITLE>/i.test(html))) {
+    throw new Error('BLOCKED: Noon Akamai 403 / Access Denied (datacenter IP)')
   }
   if (!html) { console.warn(`[${tag}] all ${NOON_MAX_RETRIES + 1} attempts failed`); return [] }
 
@@ -1017,12 +1059,12 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // Amazon EG: scope to Mobile Phones node — node 21832883031 confirmed working live.
   'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}&i=electronics&rh=n%3A21832883031`,    method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
   'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,                            method: 'native',    tier: 1, nativeScraper: scrapeJumia },
-  // 2B Egypt: native scraper PERMANENTLY DISABLED — Magento markup changes + anti-bot
-  // forced a full Firecrawl migration. All queries route directly to Firecrawl.
-  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
+  // 2B Egypt: NATIVE re-enabled (live HTML probe shows 50 product-item-link cards
+  // available without anti-bot blocking; Firecrawl path was producing 0 results
+  // and burning credits). Stage-3 Firecrawl is globally disabled by Phase-3 rule.
+  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrape2B },
   'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'native',    tier: 1, nativeScraper: scrapeNoonNative },
-  // B.TECH: native via Next.js Server Action (sub-2s structured JSON, no Firecrawl).
-  // On 0 results (e.g. action ID rotated post-deploy), Safety Valve falls back to Firecrawl.
+  // B.TECH: native via Next.js Server Action (sub-2s structured JSON).
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
   // NOTE: Carrefour is NOT registered. Per MVP decision, only the Big-5 above are wired.
   // Any request for an unregistered store is rejected at the handler with HTTP 400 — no
@@ -1312,14 +1354,17 @@ async function runRetrievalPipeline(
     }
   }
 
-  // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE, except for Noon) ──
-  // Per safety rule: if native/API failed OR returned empty, Firecrawl MUST be attempted.
-  // EXCEPTION: Noon is native-only — Firecrawl was removed (500 lifetime + 2 concurrency cap).
-  // For Noon, an empty Stage 1/2 means EMPTY_RESULT and we exit cleanly.
-  // Other allowed blockers: missing API key, exhausted time budget, denied credit reservation.
+  // ── STAGE 3: FIRECRAWL FALLBACK ──
+  // PHASE-3 RULE (Big-5 stabilization): Firecrawl is GLOBALLY DISABLED. Each store
+  // gets one native attempt. If it fails (BLOCKED, EMPTY_RESULT, TIMEOUT, NATIVE_ERROR)
+  // we surface that status and exit immediately — no second-stage retries, no Firecrawl.
+  // The flag below is the single switch — flip it back on if Big-5 stops being stable.
   const fallback_mandatory = bestProducts.length === 0
   const NATIVE_ONLY_STORES = new Set(['Noon'])
-  if (fallback_mandatory) {
+  if (fallback_mandatory && !FIRECRAWL_FALLBACK_ENABLED) {
+    fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
+    console.log(`[${store}] Stage 3 SKIPPED — FIRECRAWL_FALLBACK_ENABLED=false (Phase-3 rule). reason=${fallback_reason}`)
+  } else if (fallback_mandatory) {
     if (NATIVE_ONLY_STORES.has(store)) {
       fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
       console.log(`[${store}] Stage 3 SKIPPED — store is native-only (Firecrawl removed). reason=${fallback_reason}`)
