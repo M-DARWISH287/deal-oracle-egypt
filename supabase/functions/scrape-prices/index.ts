@@ -604,7 +604,10 @@ async function scrapeBTech(query: string, stage: ScrapeStage = 1): Promise<RawPr
       name: String(it.title),
       name_ar: String(it.title),
       price: it.price?.final_float_price || it.price?.final || it.price?.base || '',
-      url: `https://btech.com/en/${it.slug}`,
+      // B.TECH PDP URLs are Magento-style with a trailing `.html`. The bare slug
+      // path under /en/ returns 404 in production (verified live: /en/<slug> → 404,
+      // /en/<slug>.html → 200). The .html suffix is the only reliable form.
+      url: `https://btech.com/en/${it.slug}.html`,
       image: it.main_image ? `${BTECH_CDN_BASE}${it.main_image}` : '',
       specs: (it.categories_tree || []).join(' › '),
       store: 'B.TECH',
@@ -1029,12 +1032,12 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   // Amazon EG: scope to Mobile Phones node — node 21832883031 confirmed working live.
   'Amazon Egypt': { searchUrl: q => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}&i=electronics&rh=n%3A21832883031`,    method: 'native',    tier: 1, nativeScraper: scrapeAmazonEG },
   'Jumia':        { searchUrl: q => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,                            method: 'native',    tier: 1, nativeScraper: scrapeJumia },
-  // 2B Egypt: native scraper PERMANENTLY DISABLED — Magento markup changes + anti-bot
-  // forced a full Firecrawl migration. All queries route directly to Firecrawl.
-  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'firecrawl', tier: 1 },
+  // 2B Egypt: NATIVE re-enabled (live HTML probe shows 50 product-item-link cards
+  // available without anti-bot blocking; Firecrawl path was producing 0 results
+  // and burning credits). Stage-3 Firecrawl is globally disabled by Phase-3 rule.
+  '2B Egypt':     { searchUrl: q => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrape2B },
   'Noon':         { searchUrl: q => `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(q)}`,                        method: 'native',    tier: 1, nativeScraper: scrapeNoonNative },
-  // B.TECH: native via Next.js Server Action (sub-2s structured JSON, no Firecrawl).
-  // On 0 results (e.g. action ID rotated post-deploy), Safety Valve falls back to Firecrawl.
+  // B.TECH: native via Next.js Server Action (sub-2s structured JSON).
   'B.TECH':       { searchUrl: q => `https://btech.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,                   method: 'native',    tier: 1, nativeScraper: scrapeBTech },
   // NOTE: Carrefour is NOT registered. Per MVP decision, only the Big-5 above are wired.
   // Any request for an unregistered store is rejected at the handler with HTTP 400 — no
