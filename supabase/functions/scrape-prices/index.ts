@@ -1511,14 +1511,11 @@ Deno.serve(async (req) => {
     }
     let usedQuery = trimmedQuery
     try {
-      // Production budget: at most ONE variant per store. Looping expansions blew
-      // the 6s budget badly (each variant could trigger Stage1+Stage2+Firecrawl).
-      // Pick the canonical query first; only try a second variant if it returned
-      // empty AND we still have headroom.
-      for (const variant of expanded.slice(0, 2)) {
+      // Production budget: ONE variant per store. Looping expansions blew the
+      // 6s budget badly (each variant could trigger Stage1+Firecrawl).
+      for (const variant of expanded.slice(0, 1)) {
         const elapsed = Date.now() - requestStart
-        // Need at least ~1.5s of headroom to attempt another variant.
-        if (elapsed > MAX_TOTAL_MS - 1500) break
+        if (elapsed > MAX_TOTAL_MS - 1000) break
         const res = await runRetrievalPipeline(config, variant, store, firecrawlKey, {
           reserveFirecrawlCredit: async () => {
             if (!user_id) return true
