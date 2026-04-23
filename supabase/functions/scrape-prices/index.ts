@@ -1323,7 +1323,8 @@ async function runRetrievalPipeline(
     } else if (!firecrawlKey) {
       fallback_reason = 'KEY_MISSING'
       console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
-    } else if (remainingMs() <= 3000) {
+    } else if (remainingMs() <= FIRECRAWL_TIMEOUT_MS) {
+      // Need at least one Firecrawl-cap worth of time before attempting it.
       fallback_reason = 'BUDGET_EXHAUSTED'
       console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining (fallback_reason=BUDGET_EXHAUSTED)`)
     } else {
