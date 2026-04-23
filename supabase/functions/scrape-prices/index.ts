@@ -1352,14 +1352,17 @@ async function runRetrievalPipeline(
     }
   }
 
-  // ── STAGE 3: FIRECRAWL FALLBACK (NON-NEGOTIABLE, except for Noon) ──
-  // Per safety rule: if native/API failed OR returned empty, Firecrawl MUST be attempted.
-  // EXCEPTION: Noon is native-only — Firecrawl was removed (500 lifetime + 2 concurrency cap).
-  // For Noon, an empty Stage 1/2 means EMPTY_RESULT and we exit cleanly.
-  // Other allowed blockers: missing API key, exhausted time budget, denied credit reservation.
+  // ── STAGE 3: FIRECRAWL FALLBACK ──
+  // PHASE-3 RULE (Big-5 stabilization): Firecrawl is GLOBALLY DISABLED. Each store
+  // gets one native attempt. If it fails (BLOCKED, EMPTY_RESULT, TIMEOUT, NATIVE_ERROR)
+  // we surface that status and exit immediately — no second-stage retries, no Firecrawl.
+  // The flag below is the single switch — flip it back on if Big-5 stops being stable.
   const fallback_mandatory = bestProducts.length === 0
   const NATIVE_ONLY_STORES = new Set(['Noon'])
-  if (fallback_mandatory) {
+  if (fallback_mandatory && !FIRECRAWL_FALLBACK_ENABLED) {
+    fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
+    console.log(`[${store}] Stage 3 SKIPPED — FIRECRAWL_FALLBACK_ENABLED=false (Phase-3 rule). reason=${fallback_reason}`)
+  } else if (fallback_mandatory) {
     if (NATIVE_ONLY_STORES.has(store)) {
       fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
       console.log(`[${store}] Stage 3 SKIPPED — store is native-only (Firecrawl removed). reason=${fallback_reason}`)
