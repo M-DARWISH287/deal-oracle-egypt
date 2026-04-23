@@ -12,6 +12,7 @@ import Auth from "./pages/Auth.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import AdminDashboard from "./pages/AdminDashboard.tsx";
 import { AdminRoute } from "@/components/AdminRoute";
+import Benchmark from "./pages/Benchmark.tsx";
 
 const queryClient = new QueryClient();
 
@@ -29,6 +30,7 @@ const App = () => (
                 <Route path="/search" element={<SearchResults />} />
                 <Route path="/auth" element={<Auth />} />
                 <Route path="/admin/dashboard" element={<AdminRoute><AdminDashboard /></AdminRoute>} />
+                <Route path="/benchmark" element={<Benchmark />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </BrowserRouter>
