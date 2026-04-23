@@ -54,6 +54,11 @@ const STORE_TIMEOUT_MS = 15000
 const STAGE1_TIMEOUT_MS = 4500
 const STAGE2_TIMEOUT_MS = 0       // RETRY DISABLED — 6s budget cannot afford a second native attempt
 const FIRECRAWL_TIMEOUT_MS = 5000 // hard ceiling (was 90s — main latency offender)
+// PHASE-3 HARD RULE (Big-5 stabilization): No Firecrawl fallback, no retry loops.
+// Each store gets ONE native attempt within its per-store timeout, then we exit.
+// If a store cannot deliver (blocked, empty, error) we surface that status so the
+// UI can reflect partial success instead of waiting on doomed retries.
+const FIRECRAWL_FALLBACK_ENABLED = false
 // Global budget per request (Part 10): if pipeline exceeds this, we stop and return what we have.
 const MAX_TOTAL_MS = 6000
 
@@ -121,6 +126,7 @@ type FallbackReason =
   | 'CREDIT_LIMIT'
   | 'KEY_MISSING'
   | 'BUDGET_EXHAUSTED'
+  | 'BLOCKED'
   | 'NONE'
 
 // Internal stage outcome carrying the reason so the orchestrator can decide
