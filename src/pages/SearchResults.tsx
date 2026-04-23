@@ -299,8 +299,8 @@ const SearchResults = () => {
             </p>
             <p className="text-sm text-muted-foreground max-w-sm">
               {lang === 'ar'
-                ? 'جرّب كلمات مختلفة أو تحقق من الإملاء — مثلاً "iPhone 15" بدلاً من رقم الموديل الكامل.'
-                : 'Try different keywords or check spelling — e.g. "iPhone 15" instead of the full model code.'}
+                ? 'جرّب كلمات أبسط أو تحقق من الإملاء، واستخدم اسم المنتج بدلاً من رقم الموديل الكامل.'
+                : 'Try simpler keywords or check spelling — use the product name instead of the full model code.'}
             </p>
           </div>
         )}
