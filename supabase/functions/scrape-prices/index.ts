@@ -51,7 +51,9 @@ const STORE_TIMEOUT_MS = 15000
 // "complete" results in 60s. Per-store timeouts derived from the global budget.
 // Tuned against live benchmark: Amazon/Jumia HTML averages 2.5s, B.TECH ~2s,
 // Noon ~2s, 2B HTML ~3-4s. Stage 1 cap of 4.5s catches the long tail.
-const STAGE1_TIMEOUT_MS = 4500
+// PHASE-3 RULE: max 5 seconds per store. Stage 1 is the only stage that runs
+// (Stage 2/RETRY disabled, Stage 3/FIRECRAWL disabled), so this is the per-store cap.
+const STAGE1_TIMEOUT_MS = 5000
 const STAGE2_TIMEOUT_MS = 0       // RETRY DISABLED — 6s budget cannot afford a second native attempt
 const FIRECRAWL_TIMEOUT_MS = 5000 // hard ceiling (was 90s — main latency offender)
 // PHASE-3 HARD RULE (Big-5 stabilization): No Firecrawl fallback, no retry loops.
