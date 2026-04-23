@@ -46,11 +46,14 @@ const STORE_TIMEOUT_MS = 15000
 // Stage 1 (API) — primary native scraper, default UA + params.
 // Stage 2 (RETRY) — same scraper, modified request (UA rotation + page/size flip + jitter).
 // Stage 3 (FIRECRAWL) — multi-strategy LLM extraction fallback.
-const STAGE1_TIMEOUT_MS = 6000   // bumped from 3s — B.TECH Server Action regularly takes 4-6s
-const STAGE2_TIMEOUT_MS = 8000   // retry needs more headroom (server may be slower under load)
-const FIRECRAWL_TIMEOUT_MS = 90000
+// PRODUCTION HARD BUDGETS — enforced ruthlessly. Nothing may exceed MAX_TOTAL_MS.
+// A slow store is a dropped store: better to return partial results in 6s than
+// "complete" results in 60s. Per-store timeouts derived from the global budget.
+const STAGE1_TIMEOUT_MS = 3000   // native scraper hard cap (was 6s — Amazon/Jumia HTML usually < 2s)
+const STAGE2_TIMEOUT_MS = 3000   // retry uses same cap (was 8s)
+const FIRECRAWL_TIMEOUT_MS = 4000 // hard ceiling (was 90s — main latency offender)
 // Global budget per request (Part 10): if pipeline exceeds this, we stop and return what we have.
-const MAX_TOTAL_MS = 20000
+const MAX_TOTAL_MS = 6000
 
 // Quality gates (Part 5 — strict success criteria):
 const MIN_RELEVANCE_SCORE = 60       // any product below this is treated as INVALID
