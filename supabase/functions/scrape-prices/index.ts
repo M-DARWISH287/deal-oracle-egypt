@@ -153,7 +153,13 @@ async function raceWithTimeoutTraced<T>(
     }
     return { products, failure: products.length === 0 ? 'EMPTY_RESULT' : null }
   } catch (err) {
-    console.error(`[${label}] threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
+    const msg = err instanceof Error ? err.message : String(err)
+    // Scrapers signal anti-bot blocks by throwing `BLOCKED: <reason>`.
+    if (msg.startsWith('BLOCKED:')) {
+      console.warn(`[${label}] BLOCKED — ${msg.slice(8).trim()}`)
+      return { products: [], failure: 'BLOCKED' }
+    }
+    console.error(`[${label}] threw — NATIVE_ERROR:`, msg)
     return { products: [], failure: 'NATIVE_ERROR' }
   }
 }
