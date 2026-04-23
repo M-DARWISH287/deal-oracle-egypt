@@ -46,11 +46,16 @@ const STORE_TIMEOUT_MS = 15000
 // Stage 1 (API) — primary native scraper, default UA + params.
 // Stage 2 (RETRY) — same scraper, modified request (UA rotation + page/size flip + jitter).
 // Stage 3 (FIRECRAWL) — multi-strategy LLM extraction fallback.
-const STAGE1_TIMEOUT_MS = 6000   // bumped from 3s — B.TECH Server Action regularly takes 4-6s
-const STAGE2_TIMEOUT_MS = 8000   // retry needs more headroom (server may be slower under load)
-const FIRECRAWL_TIMEOUT_MS = 90000
+// PRODUCTION HARD BUDGETS — enforced ruthlessly. Nothing may exceed MAX_TOTAL_MS.
+// A slow store is a dropped store: better to return partial results in 6s than
+// "complete" results in 60s. Per-store timeouts derived from the global budget.
+// Tuned against live benchmark: Amazon/Jumia HTML averages 2.5s, B.TECH ~2s,
+// Noon ~2s, 2B HTML ~3-4s. Stage 1 cap of 4.5s catches the long tail.
+const STAGE1_TIMEOUT_MS = 4500
+const STAGE2_TIMEOUT_MS = 0       // RETRY DISABLED — 6s budget cannot afford a second native attempt
+const FIRECRAWL_TIMEOUT_MS = 5000 // hard ceiling (was 90s — main latency offender)
 // Global budget per request (Part 10): if pipeline exceeds this, we stop and return what we have.
-const MAX_TOTAL_MS = 20000
+const MAX_TOTAL_MS = 6000
 
 // Quality gates (Part 5 — strict success criteria):
 const MIN_RELEVANCE_SCORE = 60       // any product below this is treated as INVALID
@@ -1099,7 +1104,8 @@ async function callFirecrawlOnce(
         actions,
         waitFor: opts.waitFor,
         onlyMainContent: false,
-        timeout: 75000,
+        // Match our Deno-side abort budget so Firecrawl doesn't keep working past our cap.
+        timeout: FIRECRAWL_TIMEOUT_MS,
       }),
     })
     const data = await response.json()
@@ -1114,15 +1120,11 @@ async function callFirecrawlOnce(
 
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   try {
-    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false, scroll: false })
-    console.log(`[Firecrawl] ${storeName}: stage-1 (no scroll) returned ${products.length} raw products`)
-
-    // Attempt 2 on 0 results: 9s wait + scroll + alternate selector prompt.
-    if (products.length === 0) {
-      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=9000ms, scroll, alternate prompt)`)
-      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true, scroll: true })
-      console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
-    }
+    // Single attempt under the hard 4s ceiling — no retry, no scroll loop.
+    // Production budget cannot afford two Firecrawl calls; if it fails, return [].
+    const waitFor = Math.min(2000, Math.floor(FIRECRAWL_TIMEOUT_MS / 2))
+    const products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor, alternate: false, scroll: false })
+    console.log(`[Firecrawl] ${storeName}: returned ${products.length} raw products (waitFor=${waitFor}ms, single attempt)`)
     return normalizeProducts(products, storeName, query)
   } catch (err) {
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
@@ -1289,8 +1291,9 @@ async function runRetrievalPipeline(
     }
   }
 
-  // ── STAGE 2: RETRY (only if Stage 1 failed AND time remains) ──
-  if (hasNative && bestProducts.length === 0 && remainingMs() > 2000) {
+  // ── STAGE 2: RETRY (DISABLED in production — 6s budget can't afford it) ──
+  // Kept here for diagnostic toggling: setting STAGE2_TIMEOUT_MS > 0 re-enables.
+  if (STAGE2_TIMEOUT_MS > 0 && hasNative && bestProducts.length === 0 && remainingMs() > STAGE2_TIMEOUT_MS + 500) {
     attempts++
     stages_attempted.push('RETRY')
     const s2 = await runStage2_Retry(config.nativeScraper!, query, store, remainingMs())
@@ -1323,7 +1326,8 @@ async function runRetrievalPipeline(
     } else if (!firecrawlKey) {
       fallback_reason = 'KEY_MISSING'
       console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
-    } else if (remainingMs() <= 3000) {
+    } else if (remainingMs() <= FIRECRAWL_TIMEOUT_MS) {
+      // Need at least one Firecrawl-cap worth of time before attempting it.
       fallback_reason = 'BUDGET_EXHAUSTED'
       console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining (fallback_reason=BUDGET_EXHAUSTED)`)
     } else {
@@ -1507,8 +1511,11 @@ Deno.serve(async (req) => {
     }
     let usedQuery = trimmedQuery
     try {
-      for (const variant of expanded) {
-        if (Date.now() - requestStart > MAX_TOTAL_MS - 1000) break
+      // Production budget: ONE variant per store. Looping expansions blew the
+      // 6s budget badly (each variant could trigger Stage1+Firecrawl).
+      for (const variant of expanded.slice(0, 1)) {
+        const elapsed = Date.now() - requestStart
+        if (elapsed > MAX_TOTAL_MS - 1000) break
         const res = await runRetrievalPipeline(config, variant, store, firecrawlKey, {
           reserveFirecrawlCredit: async () => {
             if (!user_id) return true
