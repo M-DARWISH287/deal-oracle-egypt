@@ -1291,8 +1291,9 @@ async function runRetrievalPipeline(
     }
   }
 
-  // ── STAGE 2: RETRY (only if Stage 1 failed AND time remains) ──
-  if (hasNative && bestProducts.length === 0 && remainingMs() > 2000) {
+  // ── STAGE 2: RETRY (DISABLED in production — 6s budget can't afford it) ──
+  // Kept here for diagnostic toggling: setting STAGE2_TIMEOUT_MS > 0 re-enables.
+  if (STAGE2_TIMEOUT_MS > 0 && hasNative && bestProducts.length === 0 && remainingMs() > STAGE2_TIMEOUT_MS + 500) {
     attempts++
     stages_attempted.push('RETRY')
     const s2 = await runStage2_Retry(config.nativeScraper!, query, store, remainingMs())
