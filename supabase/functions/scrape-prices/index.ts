@@ -1102,7 +1102,8 @@ async function callFirecrawlOnce(
         actions,
         waitFor: opts.waitFor,
         onlyMainContent: false,
-        timeout: 75000,
+        // Match our Deno-side abort budget so Firecrawl doesn't keep working past our cap.
+        timeout: FIRECRAWL_TIMEOUT_MS,
       }),
     })
     const data = await response.json()
