@@ -1118,15 +1118,11 @@ async function callFirecrawlOnce(
 
 async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
   try {
-    let products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 5000, alternate: false, scroll: false })
-    console.log(`[Firecrawl] ${storeName}: stage-1 (no scroll) returned ${products.length} raw products`)
-
-    // Attempt 2 on 0 results: 9s wait + scroll + alternate selector prompt.
-    if (products.length === 0) {
-      console.log(`[Firecrawl] ${storeName}: 0 results — retrying (waitFor=9000ms, scroll, alternate prompt)`)
-      products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor: 9000, alternate: true, scroll: true })
-      console.log(`[Firecrawl] ${storeName}: stage-2 returned ${products.length} raw products`)
-    }
+    // Single attempt under the hard 4s ceiling — no retry, no scroll loop.
+    // Production budget cannot afford two Firecrawl calls; if it fails, return [].
+    const waitFor = Math.min(2000, Math.floor(FIRECRAWL_TIMEOUT_MS / 2))
+    const products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor, alternate: false, scroll: false })
+    console.log(`[Firecrawl] ${storeName}: returned ${products.length} raw products (waitFor=${waitFor}ms, single attempt)`)
     return normalizeProducts(products, storeName, query)
   } catch (err) {
     console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
