@@ -1128,6 +1128,7 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
   }
 
   console.log(`[${tag}] extracted ${hits.length} raw hits`)
+  dbg.raw_items_found = hits.length
   if (hits.length === 0) return []
 
   // Map → shape expected by normalizeProducts (which applies relevance + accessory + floor).
@@ -1153,7 +1154,11 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
       store: 'Noon',
     })
   }
-  return normalizeProducts(mapped, 'Noon', query)
+  const out = normalizeProducts(mapped, 'Noon', query)
+  dbg.items_returned = out.length
+  dbg.items_found = out.length
+  console.log(`[Noon] raw_items_found=${hits.length} items_returned=${out.length}`)
+  return out
 }
 
 // ════════════════════════════════════════════════════════════════════
