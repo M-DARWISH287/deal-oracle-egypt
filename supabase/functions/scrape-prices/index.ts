@@ -922,6 +922,7 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
       })
       .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
   } catch (err) {
+    dbg.error = err instanceof Error ? err.message : String(err)
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
     return []
   }
