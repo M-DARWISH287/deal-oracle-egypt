@@ -1325,29 +1325,7 @@ async function runStage2_Retry(
   }
 }
 
-async function runStage3_Firecrawl(
-  query: string, store: string, searchUrl: string, firecrawlKey: string,
-): Promise<StageResult> {
-  const t0 = Date.now()
-  let raw: RawProduct[] = []
-  let failureBase: FallbackReason | null = null
-  try {
-    raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
-    if (!Array.isArray(raw)) { failureBase = 'INVALID_RESPONSE'; raw = [] }
-  } catch (err) {
-    console.error(`[${store}] Stage 3 (FIRECRAWL) threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
-    failureBase = 'NATIVE_ERROR'
-  }
-  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
-  const ok = valid.length > 0
-  return {
-    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok,
-    failure: ok ? null : (failureBase ?? 'EMPTY_RESULT'),
-  }
-}
-
-// Top-level orchestrator (Part 1-12). Runs Stage 1 → 2 → 3 deterministically
+// Top-level orchestrator. Runs Stage 1 (native) deterministically
 // with quality gates, early exit, structured logs, and a global time budget.
 interface PipelineResult {
   products: RawProduct[]
@@ -1364,8 +1342,6 @@ interface PipelineResult {
 
 async function runRetrievalPipeline(
   config: StoreConfig, query: string, store: string,
-  firecrawlKey: string | undefined,
-  options: { reserveFirecrawlCredit: () => Promise<boolean>; },
 ): Promise<PipelineResult> {
   const t0 = Date.now()
   let stage_used: StageUsed = 'API'
