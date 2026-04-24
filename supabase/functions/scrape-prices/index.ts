@@ -860,7 +860,17 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
     const res = await fetchWithTimeout(url)
     dbg.status = res.status
     console.log(`[2B] status:`, res.status)
-    if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
+    if (!res.ok) {
+      // 403/503/429 → datacenter throttle/block. Surface as BLOCKED so the UI
+      // shows the correct status and the pipeline doesn't waste a retry.
+      if (res.status === 403 || res.status === 503 || res.status === 429) {
+        dbg.detected_block = true
+        dbg.block_signal = `HTTP ${res.status}`
+        console.log(`[2B] BLOCKED (HTTP ${res.status})`)
+        throw new Error(`BLOCKED: HTTP ${res.status} from 2b.com.eg (datacenter throttle)`)
+      }
+      console.log(`[2B native] HTTP ${res.status}`); return []
+    }
     const html = await res.text()
     dbg.html_length = html.length
     console.log(`[2B] html length:`, html.length)
