@@ -984,7 +984,15 @@ async function fetchNoonOnce(url: string, attempt: number): Promise<Response | n
       },
     })
   } catch (err) {
-    console.warn(`[Noon native] attempt ${attempt + 1} fetch failed:`, err instanceof Error ? err.message : err)
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`[Noon native] attempt ${attempt + 1} fetch failed:`, msg)
+    // CRITICAL: Akamai uses TLS-fingerprint + HTTP/2 reset to reject datacenter
+    // clients (Deno, curl, etc.). The SendRequest never returns a Response —
+    // we get a "stream error" before any byte of HTML. Mark this as BLOCKED so
+    // the UI shows the correct status instead of a misleading "empty".
+    if (/http2 error|stream error|SendRequest|client error/i.test(msg)) {
+      throw new Error('BLOCKED: Noon Akamai HTTP/2 stream reset (datacenter TLS fingerprint)')
+    }
     return null
   } finally { clearTimeout(t) }
 }
