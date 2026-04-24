@@ -626,23 +626,61 @@ async function scrapeBTech(query: string, stage: ScrapeStage = 1): Promise<RawPr
 // that always return 0 for high-end phones).
 const JUMIA_EARLY_FALLBACK_BATCH = 25
 
+// ── TEMPORARY DIAGNOSTICS (Phase: Jumia/2B empty-result triage) ──
+// Captured per scraper invocation, attached to the HTTP response under `debug`.
+// Remove once root cause is fixed.
+type StoreDebug = {
+  store: string
+  url?: string
+  status?: number
+  html_length?: number
+  detected_block?: boolean
+  block_signal?: string
+  items_found?: number
+  cards_scanned?: number
+  accepted?: number
+  error?: string
+}
+const __lastDebug: Record<string, StoreDebug> = {}
+
 async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawProduct[]> {
   const tag = `Jumia native stage-${stage}`
+  const dbg: StoreDebug = { store: 'Jumia' }
+  __lastDebug['Jumia'] = dbg
   try {
     const mobileQuery = `${query} smartphone`
     const pageParam = stage === 2 ? '&page=2' : ''
     const url = `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(mobileQuery)}${pageParam}`
+    dbg.url = url
+    console.log(`[Jumia] START`)
+    console.log(`[Jumia] URL:`, url)
     const headers = stage === 2 ? STEALTH_HEADERS_ALT : undefined
     const res = await fetchWithTimeout(url, headers ? { headers } : {})
+    dbg.status = res.status
+    console.log(`[Jumia] status:`, res.status)
     if (res.status === 403 || res.status === 503 || res.status === 429) {
+      dbg.detected_block = true
+      dbg.block_signal = `HTTP ${res.status}`
+      console.log(`[Jumia] BLOCKED by Cloudflare (HTTP ${res.status})`)
       throw new Error(`BLOCKED: HTTP ${res.status} from jumia.com.eg (Cloudflare challenge)`)
     }
     if (!res.ok) { console.log(`[${tag}] HTTP ${res.status}`); return [] }
     const html = await res.text()
+    dbg.html_length = html.length
+    console.log(`[Jumia] html length:`, html.length)
     // Cloudflare interstitial — "Just a moment..." challenge page.
-    if (/Just a moment\.\.\./i.test(html) || /cf-challenge-running/i.test(html) || /id="challenge-error-text"/i.test(html)) {
+    const cfJustMoment = /Just a moment\.\.\./i.test(html)
+    const cfChallenge = /cf-challenge-running/i.test(html) || /cf-challenge/i.test(html)
+    const cfBranded = /Cloudflare/i.test(html)
+    const cfError = /id="challenge-error-text"/i.test(html)
+    if (cfJustMoment || cfChallenge || cfError) {
+      dbg.detected_block = true
+      dbg.block_signal = cfJustMoment ? 'Just a moment...' : cfChallenge ? 'cf-challenge' : 'challenge-error-text'
+      console.log(`[Jumia] BLOCKED by Cloudflare (signal: ${dbg.block_signal})`)
       throw new Error('BLOCKED: Jumia Cloudflare challenge page')
     }
+    dbg.detected_block = false
+    if (cfBranded) console.log(`[Jumia] note: HTML mentions Cloudflare but no challenge interstitial`)
 
     // ── STREAMING extraction with EARLY FALLBACK GATE ──
     // Walk articles one at a time, filter per-node. After scanning the first
@@ -690,6 +728,9 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
       scores.set(absUrl, score)
     }
     console.log(`[${tag}] streamed ${scanned} cards, accepted ${accepted.length}`)
+    dbg.cards_scanned = scanned
+    dbg.accepted = accepted.length
+    dbg.items_found = accepted.length
     // Pre-validated → bypass relevance double-check, but still apply price floor.
     return accepted
       .map(p => {
