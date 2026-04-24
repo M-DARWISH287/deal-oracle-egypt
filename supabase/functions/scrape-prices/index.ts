@@ -1424,23 +1424,6 @@ async function runRetrievalPipeline(
     avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
 }
 
-async function reserveCredits(supabaseUrl: string, serviceKey: string, userId: string, store: string, query: string): Promise<string | null> {
-  const sb = createClient(supabaseUrl, serviceKey)
-  try {
-    const { data, error } = await sb.rpc('reserve_credits', { p_user_id: userId, p_amount: 1, p_store: store, p_query: query })
-    if (error) { console.error('[Credits] Reserve failed:', error.message); return null }
-    return data as string
-  } catch (err) { console.error('[Credits] Reserve error:', err); return null }
-}
-
-async function settleCredits(supabaseUrl: string, serviceKey: string, txId: string, actualCost: number): Promise<void> {
-  const sb = createClient(supabaseUrl, serviceKey)
-  try {
-    const { error } = await sb.rpc('settle_credits', { p_tx_id: txId, p_actual_cost: actualCost })
-    if (error) console.error('[Credits] Settle failed:', error.message)
-  } catch (err) { console.error('[Credits] Settle error:', err) }
-}
-
 // ── PIPELINE_TRACE EMITTER (Part 2 — failure visibility, no silent fails) ──
 // Emits exactly one structured trace per request lifecycle. Called on every
 // exit path: success, scrape error, outer catch, validation failure.
