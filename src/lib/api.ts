@@ -43,6 +43,8 @@ export interface Product {
 export interface StoreSearchResult {
   success: boolean; products: RawProduct[]; cached: boolean;
   store: string; cachedAt?: string; error?: string;
+  /** Debug-mode pipeline status: 'success' | 'empty' | 'blocked' | 'failed' */
+  status?: 'success' | 'empty' | 'blocked' | 'failed';
 }
 
 // ── localStorage Cache (Layer 1) ──
