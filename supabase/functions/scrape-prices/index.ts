@@ -913,7 +913,8 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
     dbg.cards_scanned = scanned
     dbg.accepted = accepted.length
     dbg.items_found = accepted.length
-    return accepted
+    dbg.raw_items_found = scanned
+    const out = accepted
       .map(p => {
         const parsed = parsePrice(p.price as any)
         return {
@@ -924,6 +925,8 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
         } as RawProduct
       })
       .filter(p => (p.price as number) > 0)
+    dbg.items_returned = out.length
+    return out
   } catch (err) {
     dbg.error = err instanceof Error ? err.message : String(err)
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
