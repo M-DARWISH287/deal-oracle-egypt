@@ -1786,6 +1786,7 @@ Deno.serve(async (req) => {
       products,
       cached: false,
       store,
+      status: products.length > 0 ? 'success' : 'empty',
       usedFallback,
       stage_used: pipeline.stage_used,
       stages_attempted: pipeline.stages_attempted,
