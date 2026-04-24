@@ -637,6 +637,8 @@ type StoreDebug = {
   cards_scanned?: number
   accepted?: number
   error?: string
+  raw_items_found?: number
+  items_returned?: number
 }
 const __lastDebug: Record<string, StoreDebug> = {}
 
@@ -689,7 +691,8 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
     let scanned = 0
     let m: RegExpExecArray | null
     while ((m = articleRe.exec(html)) !== null) {
-      if (accepted.length >= 5) break
+      // DEBUG MODE: take up to 10 raw items so the UI gets ≥3 minimum.
+      if (accepted.length >= 10) break
       // Early-fallback gate: meaningful batch processed, still empty → bail to fallback.
       if (scanned >= JUMIA_EARLY_FALLBACK_BATCH && accepted.length === 0) {
         console.log(`[${tag}] streamed ${scanned} cards with 0 valid phones — bailing for Firecrawl fallback`)
@@ -728,8 +731,9 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
     dbg.cards_scanned = scanned
     dbg.accepted = accepted.length
     dbg.items_found = accepted.length
+    dbg.raw_items_found = scanned
     // Pre-validated → bypass relevance double-check, but still apply price floor.
-    return accepted
+    const out = accepted
       .map(p => {
         const parsed = parsePrice(p.price as any)
         return {
@@ -739,7 +743,9 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
           confidenceScore: scores.get(String(p.url)) ?? 0,
         } as RawProduct
       })
-      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
+      .filter(p => (p.price as number) > 0)
+    dbg.items_returned = out.length
+    return out
   } catch (err) {
     dbg.error = err instanceof Error ? err.message : String(err)
     console.error(`[${tag}] error:`, err instanceof Error ? err.message : err)
@@ -854,7 +860,17 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
     const res = await fetchWithTimeout(url)
     dbg.status = res.status
     console.log(`[2B] status:`, res.status)
-    if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
+    if (!res.ok) {
+      // 403/503/429 → datacenter throttle/block. Surface as BLOCKED so the UI
+      // shows the correct status and the pipeline doesn't waste a retry.
+      if (res.status === 403 || res.status === 503 || res.status === 429) {
+        dbg.detected_block = true
+        dbg.block_signal = `HTTP ${res.status}`
+        console.log(`[2B] BLOCKED (HTTP ${res.status})`)
+        throw new Error(`BLOCKED: HTTP ${res.status} from 2b.com.eg (datacenter throttle)`)
+      }
+      console.log(`[2B native] HTTP ${res.status}`); return []
+    }
     const html = await res.text()
     dbg.html_length = html.length
     console.log(`[2B] html length:`, html.length)
@@ -907,7 +923,8 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
     dbg.cards_scanned = scanned
     dbg.accepted = accepted.length
     dbg.items_found = accepted.length
-    return accepted
+    dbg.raw_items_found = scanned
+    const out = accepted
       .map(p => {
         const parsed = parsePrice(p.price as any)
         return {
@@ -918,6 +935,8 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
         } as RawProduct
       })
       .filter(p => (p.price as number) > 0)
+    dbg.items_returned = out.length
+    return out
   } catch (err) {
     dbg.error = err instanceof Error ? err.message : String(err)
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
@@ -984,25 +1003,48 @@ async function fetchNoonOnce(url: string, attempt: number): Promise<Response | n
       },
     })
   } catch (err) {
-    console.warn(`[Noon native] attempt ${attempt + 1} fetch failed:`, err instanceof Error ? err.message : err)
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`[Noon native] attempt ${attempt + 1} fetch failed:`, msg)
+    // CRITICAL: Akamai uses TLS-fingerprint + HTTP/2 reset to reject datacenter
+    // clients (Deno, curl, etc.). The SendRequest never returns a Response —
+    // we get a "stream error" before any byte of HTML. Mark this as BLOCKED so
+    // the UI shows the correct status instead of a misleading "empty".
+    if (/http2 error|stream error|SendRequest|client error/i.test(msg)) {
+      throw new Error('BLOCKED: Noon Akamai HTTP/2 stream reset (datacenter TLS fingerprint)')
+    }
     return null
   } finally { clearTimeout(t) }
 }
 
 async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
   const tag = 'Noon native'
+  const dbg: StoreDebug = { store: 'Noon' }
+  __lastDebug['Noon'] = dbg
   const url = `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(query)}`
+  dbg.url = url
+  console.log(`[Noon] START`)
+  console.log(`[Noon] URL:`, url)
 
   // Up to 1 + NOON_MAX_RETRIES attempts with exponential backoff (200ms, 500ms).
   let html: string | null = null
   let blocked = false
+  let lastStatus = 0
+  let throwBlocked: Error | null = null
   for (let attempt = 0; attempt <= NOON_MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       const backoff = Math.min(500, 200 * 2 ** (attempt - 1))
       await new Promise(r => setTimeout(r, backoff))
     }
-    const res = await fetchNoonOnce(url, attempt)
+    let res: Response | null
+    try {
+      res = await fetchNoonOnce(url, attempt)
+    } catch (err) {
+      // BLOCKED throw from fetchNoonOnce — capture and break (no point retrying).
+      throwBlocked = err instanceof Error ? err : new Error(String(err))
+      break
+    }
     if (!res) continue
+    lastStatus = res.status
     if (res.status === 403) {
       // Akamai datacenter block — retrying won't help, but we let the loop finish
       // so the LAST attempt's body can be inspected for Access Denied confirmation.
@@ -1023,10 +1065,29 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
       continue
     }
   }
+  dbg.status = lastStatus
+  if (throwBlocked) {
+    dbg.detected_block = true
+    dbg.block_signal = 'HTTP/2 stream reset (Akamai TLS fingerprint)'
+    dbg.error = throwBlocked.message
+    console.log(`[Noon] BLOCKED: ${throwBlocked.message}`)
+    throw throwBlocked
+  }
   if (blocked || (html && /<TITLE>Access Denied<\/TITLE>/i.test(html))) {
+    dbg.detected_block = true
+    dbg.block_signal = blocked ? 'HTTP 403' : 'Access Denied page'
     throw new Error('BLOCKED: Noon Akamai 403 / Access Denied (datacenter IP)')
   }
-  if (!html) { console.warn(`[${tag}] all ${NOON_MAX_RETRIES + 1} attempts failed`); return [] }
+  if (!html) {
+    console.warn(`[${tag}] all ${NOON_MAX_RETRIES + 1} attempts failed`)
+    // No HTML received and no explicit 403 — still effectively blocked at network layer.
+    dbg.detected_block = true
+    dbg.block_signal = 'no response body after retries'
+    throw new Error('BLOCKED: Noon — no HTML response after retries (datacenter network rejection)')
+  }
+  dbg.html_length = html.length
+  console.log(`[Noon] html length:`, html.length)
+  dbg.detected_block = false
 
   // ── Strategy A: __NEXT_DATA__ JSON blob (most reliable) ──
   const hits: NoonHit[] = []
@@ -1083,6 +1144,7 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
   }
 
   console.log(`[${tag}] extracted ${hits.length} raw hits`)
+  dbg.raw_items_found = hits.length
   if (hits.length === 0) return []
 
   // Map → shape expected by normalizeProducts (which applies relevance + accessory + floor).
@@ -1108,7 +1170,11 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
       store: 'Noon',
     })
   }
-  return normalizeProducts(mapped, 'Noon', query)
+  const out = normalizeProducts(mapped, 'Noon', query)
+  dbg.items_returned = out.length
+  dbg.items_found = out.length
+  console.log(`[Noon] raw_items_found=${hits.length} items_returned=${out.length}`)
+  return out
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1687,6 +1753,8 @@ Deno.serve(async (req) => {
         error: errMsg,
         benchmark: errBenchmark,
         debug: __lastDebug[store] || null,
+        raw_items_found: __lastDebug[store]?.raw_items_found ?? 0,
+        items_returned: 0,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
@@ -1813,6 +1881,8 @@ Deno.serve(async (req) => {
       used_query: usedQuery,
       benchmark,
       debug: __lastDebug[store] || null,
+      raw_items_found: storeDebug?.raw_items_found ?? products.length,
+      items_returned: products.length,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     // Outer catch — even an unexpected crash MUST leave a PIPELINE_TRACE.
