@@ -637,6 +637,8 @@ type StoreDebug = {
   cards_scanned?: number
   accepted?: number
   error?: string
+  raw_items_found?: number
+  items_returned?: number
 }
 const __lastDebug: Record<string, StoreDebug> = {}
 
