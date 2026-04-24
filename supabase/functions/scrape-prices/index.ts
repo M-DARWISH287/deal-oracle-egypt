@@ -731,8 +731,9 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
     dbg.cards_scanned = scanned
     dbg.accepted = accepted.length
     dbg.items_found = accepted.length
+    dbg.raw_items_found = scanned
     // Pre-validated → bypass relevance double-check, but still apply price floor.
-    return accepted
+    const out = accepted
       .map(p => {
         const parsed = parsePrice(p.price as any)
         return {
@@ -742,7 +743,9 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
           confidenceScore: scores.get(String(p.url)) ?? 0,
         } as RawProduct
       })
-      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
+      .filter(p => (p.price as number) > 0)
+    dbg.items_returned = out.length
+    return out
   } catch (err) {
     dbg.error = err instanceof Error ? err.message : String(err)
     console.error(`[${tag}] error:`, err instanceof Error ? err.message : err)
