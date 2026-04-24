@@ -1238,87 +1238,13 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   console.log(`[STORE_REGISTRY] OK — ${Object.keys(STORE_CONFIGS).length} stores wired: ${Object.keys(STORE_CONFIGS).join(', ')}`)
 })()
 
-// ── Scraper: Firecrawl (Stage 3 multi-strategy fallback) ──
-// Attempt 1 (stage 1): waitFor=5000, NO scroll — fastest path, works for static SSR pages.
-// Attempt 2 (stage 2): waitFor=9000 + scroll actions + alternative selector prompt — for
-// lazy-loaded SPA grids that need user interaction to hydrate.
-async function callFirecrawlOnce(
-  storeName: string, query: string, searchUrl: string, firecrawlKey: string,
-  opts: { waitFor: number; alternate: boolean; scroll: boolean },
-): Promise<any[]> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
-  try {
-    const actions = opts.scroll
-      ? [
-          { type: 'wait', milliseconds: opts.waitFor },
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 1500 },
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 1500 },
-        ]
-      : [{ type: 'wait', milliseconds: opts.waitFor }]
-
-    const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
-    const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
-
-    const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${firecrawlKey}`, 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        url: searchUrl,
-        formats: [{
-          type: 'json',
-          schema: {
-            type: 'object',
-            properties: {
-              products: {
-                type: 'array', items: {
-                  type: 'object',
-                  properties: {
-                    name: { type: 'string' }, name_ar: { type: 'string' },
-                    price: { type: 'string' }, url: { type: 'string' },
-                    image: { type: 'string' }, specs: { type: 'string' },
-                  },
-                  required: ['name', 'price', 'url'],
-                },
-              },
-            },
-            required: ['products'],
-          },
-          prompt: opts.alternate ? promptAlt : promptBase,
-        }],
-        actions,
-        waitFor: opts.waitFor,
-        onlyMainContent: false,
-        // Match our Deno-side abort budget so Firecrawl doesn't keep working past our cap.
-        timeout: FIRECRAWL_TIMEOUT_MS,
-      }),
-    })
-    const data = await response.json()
-    if (!response.ok) {
-      console.error(`[Firecrawl] ${storeName} HTTP ${response.status}:`, JSON.stringify(data).slice(0, 200))
-      return []
-    }
-    return data?.data?.json?.products || data?.json?.products
-        || data?.data?.extract?.products || data?.extract?.products || []
-  } finally { clearTimeout(timeout) }
-}
-
-async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
-  try {
-    // Single attempt under the hard 4s ceiling — no retry, no scroll loop.
-    // Production budget cannot afford two Firecrawl calls; if it fails, return [].
-    const waitFor = Math.min(2000, Math.floor(FIRECRAWL_TIMEOUT_MS / 2))
-    const products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor, alternate: false, scroll: false })
-    console.log(`[Firecrawl] ${storeName}: returned ${products.length} raw products (waitFor=${waitFor}ms, single attempt)`)
-    return normalizeProducts(products, storeName, query)
-  } catch (err) {
-    console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
-    return []
-  }
-}
+// ── Firecrawl Stage-3 fallback REMOVED (resource audit 2026-04) ──
+// The entire callFirecrawlOnce / scrapeWithFirecrawl / runStage3_Firecrawl
+// pipeline was deleted to eliminate background Firecrawl traffic and credit
+// burn. The Big-5 native scrapers run exactly once per request under their
+// per-store timeout. The standalone /benchmark page (firecrawl-benchmark
+// edge function) remains the only path that talks to Firecrawl, and only
+// when manually triggered by an operator.
 
 // ════════════════════════════════════════════════════════════════════
 // ── DETERMINISTIC 3-STAGE RETRIEVAL ENGINE ──
