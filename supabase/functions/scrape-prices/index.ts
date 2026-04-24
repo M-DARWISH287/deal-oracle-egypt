@@ -1785,12 +1785,20 @@ Deno.serve(async (req) => {
       success: products.length > 0,
     })
 
+    // Status derivation: 'success' if any product, 'blocked' if the per-store
+    // debug capture flagged anti-bot/Cloudflare, otherwise 'empty'.
+    const storeDebug = __lastDebug[store]
+    const wasBlocked = !!(storeDebug && storeDebug.detected_block) ||
+      pipeline.fallback_reason === 'BLOCKED'
+    const finalStatus: 'success' | 'empty' | 'blocked' =
+      products.length > 0 ? 'success' : wasBlocked ? 'blocked' : 'empty'
+
     return new Response(JSON.stringify({
       success: true,
       products,
       cached: false,
       store,
-      status: products.length > 0 ? 'success' : 'empty',
+      status: finalStatus,
       usedFallback,
       stage_used: pipeline.stage_used,
       stages_attempted: pipeline.stages_attempted,
