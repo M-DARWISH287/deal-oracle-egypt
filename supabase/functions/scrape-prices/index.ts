@@ -1407,44 +1407,14 @@ async function runRetrievalPipeline(
   // gets one native attempt. If it fails (BLOCKED, EMPTY_RESULT, TIMEOUT, NATIVE_ERROR)
   // we surface that status and exit immediately — no second-stage retries, no Firecrawl.
   // The flag below is the single switch — flip it back on if Big-5 stops being stable.
+  // ── STAGE 3 REMOVED (resource audit 2026-04) ──
+  // Firecrawl fallback was permanently disabled (FIRECRAWL_FALLBACK_ENABLED=false)
+  // and the entire Stage-3 code path has been deleted to stop background drain.
+  // If a store fails its single native attempt we surface the cause and exit.
   const fallback_mandatory = bestProducts.length === 0
-  const NATIVE_ONLY_STORES = new Set(['Noon'])
-  if (fallback_mandatory && !FIRECRAWL_FALLBACK_ENABLED) {
+  if (fallback_mandatory) {
     fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
-    console.log(`[${store}] Stage 3 SKIPPED — FIRECRAWL_FALLBACK_ENABLED=false (Phase-3 rule). reason=${fallback_reason}`)
-  } else if (fallback_mandatory) {
-    if (NATIVE_ONLY_STORES.has(store)) {
-      fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
-      console.log(`[${store}] Stage 3 SKIPPED — store is native-only (Firecrawl removed). reason=${fallback_reason}`)
-    } else if (!firecrawlKey) {
-      fallback_reason = 'KEY_MISSING'
-      console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
-    } else if (remainingMs() <= FIRECRAWL_TIMEOUT_MS) {
-      // Need at least one Firecrawl-cap worth of time before attempting it.
-      fallback_reason = 'BUDGET_EXHAUSTED'
-      console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining (fallback_reason=BUDGET_EXHAUSTED)`)
-    } else {
-      const creditOk = await options.reserveFirecrawlCredit()
-      if (!creditOk) {
-        fallback_reason = 'CREDIT_LIMIT'
-        console.warn(`[${store}] Stage 3 SKIPPED — credit reservation failed (fallback_reason=CREDIT_LIMIT)`)
-      } else {
-        attempts++
-        stages_attempted.push('FIRECRAWL')
-        const triggerReason = hasNative ? (nativeFailureCause ?? 'EMPTY_RESULT') : 'EMPTY_RESULT'
-        console.log(`[${store}] FALLBACK_TRIGGERED_FIRECRAWL trigger=${triggerReason} mandatory=true`)
-        const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
-        console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms failure=${s3.failure ?? 'none'}`)
-        if (s3.ok) {
-          stage_used = 'FIRECRAWL'; usedFallback = true
-          bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
-          fallback_reason = 'NONE'
-        } else {
-          // Firecrawl ran but produced nothing — surface its specific failure cause.
-          fallback_reason = s3.failure ?? 'EMPTY_RESULT'
-        }
-      }
-    }
+    console.log(`[${store}] No fallback — native-only pipeline. reason=${fallback_reason}`)
   }
 
   if (bestProducts.length === 0) stage_used = 'FAIL'
