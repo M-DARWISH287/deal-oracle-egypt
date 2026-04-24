@@ -141,13 +141,24 @@ async function raceWithTimeoutTraced<T>(
   p: Promise<T[]>, timeoutMs: number, label: string,
 ): Promise<StageOutcome<T>> {
   let timedOut = false
-  const timeoutPromise = new Promise<T[]>((resolve) => setTimeout(() => {
-    timedOut = true
-    console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage (TIMEOUT)`)
-    resolve([])
-  }, timeoutMs))
+  // PROD HARDENING (resource audit): always clear the timer when the real
+  // promise wins the race so the timeout callback doesn't keep the isolate
+  // alive after the response is sent. Previously the unused timer + the
+  // losing scraper kept consuming compute past the per-stage budget.
+  let timerId: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<T[]>((resolve) => {
+    timerId = setTimeout(() => {
+      timedOut = true
+      console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage (TIMEOUT)`)
+      resolve([])
+    }, timeoutMs)
+  })
   try {
     const products = await Promise.race([p, timeoutPromise])
+    if (timerId !== undefined) clearTimeout(timerId)
+    // Detach any rejection from the losing scraper so it doesn't surface as an
+    // unhandled rejection after we've already returned.
+    p.catch(() => { /* swallowed — stage already resolved via race */ })
     if (timedOut) return { products: [], failure: 'TIMEOUT' }
     if (!Array.isArray(products)) {
       console.warn(`[${label}] returned non-array — INVALID_RESPONSE`)
@@ -155,6 +166,7 @@ async function raceWithTimeoutTraced<T>(
     }
     return { products, failure: products.length === 0 ? 'EMPTY_RESULT' : null }
   } catch (err) {
+    if (timerId !== undefined) clearTimeout(timerId)
     const msg = err instanceof Error ? err.message : String(err)
     // Scrapers signal anti-bot blocks by throwing `BLOCKED: <reason>`.
     if (msg.startsWith('BLOCKED:')) {
