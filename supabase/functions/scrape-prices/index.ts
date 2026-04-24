@@ -845,12 +845,37 @@ async function scrapeAmazonEG(query: string, stage: ScrapeStage = 1): Promise<Ra
 // BEFORE collecting price candidates → the crossed-out original price is gone,
 // only the active discount survives, and Math.min picks the lowest.
 async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProduct[]> {
+  const dbg: StoreDebug = { store: '2B Egypt' }
+  __lastDebug['2B Egypt'] = dbg
   try {
     const mobileQuery = `${query} smartphone`
     const url = `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(mobileQuery)}`
+    dbg.url = url
+    console.log(`[2B] START`)
+    console.log(`[2B] URL:`, url)
     const res = await fetchWithTimeout(url)
+    dbg.status = res.status
+    console.log(`[2B] status:`, res.status)
     if (!res.ok) { console.log(`[2B native] HTTP ${res.status}`); return [] }
     const html = await res.text()
+    dbg.html_length = html.length
+    console.log(`[2B] html length:`, html.length)
+    // Quick selector probe: how many product-item-link anchors does the HTML contain?
+    const linkProbe = html.match(/class="[^"]*product-item-link[^"]*"/g)
+    const itemProbe = html.match(/<li[^>]*class="[^"]*\bproduct-item\b[^"]*"/g)
+    console.log(`[2B] items found (product-item-link):`, linkProbe ? linkProbe.length : 0)
+    console.log(`[2B] items found (li.product-item):`, itemProbe ? itemProbe.length : 0)
+    // Block heuristics for completeness.
+    const blockSignal =
+      /Just a moment\.\.\./i.test(html) ? 'Just a moment...' :
+      /cf-challenge/i.test(html) ? 'cf-challenge' :
+      /Access denied/i.test(html) ? 'Access denied' :
+      null
+    dbg.detected_block = blockSignal !== null
+    if (blockSignal) {
+      dbg.block_signal = blockSignal
+      console.log(`[2B] BLOCKED signal:`, blockSignal)
+    }
 
     // ── STREAMING extraction: walk <li class="product-item"> sequentially with regex.exec,
     // filter accessories + relevance per node, stop at 5 valid products. Avoids the
@@ -881,6 +906,9 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
       scores.set(absUrl, score)
     }
     console.log(`[2B native] streamed ${scanned} items, accepted ${accepted.length}`)
+    dbg.cards_scanned = scanned
+    dbg.accepted = accepted.length
+    dbg.items_found = accepted.length
     return accepted
       .map(p => {
         const parsed = parsePrice(p.price as any)
