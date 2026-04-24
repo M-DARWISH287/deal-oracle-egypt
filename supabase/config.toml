@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.stores-benchmark-v2]
 verify_jwt = false
+
+[functions.stores-benchmark-v3]
+verify_jwt = false
