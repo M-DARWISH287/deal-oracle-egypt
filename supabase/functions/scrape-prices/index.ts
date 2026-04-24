@@ -689,7 +689,8 @@ async function scrapeJumia(query: string, stage: ScrapeStage = 1): Promise<RawPr
     let scanned = 0
     let m: RegExpExecArray | null
     while ((m = articleRe.exec(html)) !== null) {
-      if (accepted.length >= 5) break
+      // DEBUG MODE: take up to 10 raw items so the UI gets ≥3 minimum.
+      if (accepted.length >= 10) break
       // Early-fallback gate: meaningful batch processed, still empty → bail to fallback.
       if (scanned >= JUMIA_EARLY_FALLBACK_BATCH && accepted.length === 0) {
         console.log(`[${tag}] streamed ${scanned} cards with 0 valid phones — bailing for Firecrawl fallback`)
