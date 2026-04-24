@@ -483,18 +483,15 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
   } finally { clearTimeout(timeout) }
 }
 
-// Per-item gate used by streaming scrapers: accessory + out-of-stock + relevance.
-// Returns the relevance score on accept, or null on reject.
-function acceptItem(name: string, specs: string | undefined, query: string, storeName: string): number | null {
-  const blob = `${name} ${specs || ''}`
-  if (isAccessory(blob)) return null
-  if (isOutOfStock(blob)) return null
-  const rel = validateRelevance(query, name)
-  if (!rel.isRelevant) {
-    console.log(`[${storeName}] Relevance reject: "${name.slice(0, 80)}"`)
-    return null
-  }
-  return rel.score
+// ── DEBUG MODE — Per-item gate intentionally relaxed ──
+// We are diagnosing pipeline drop-offs across the Big 5. To guarantee any product
+// with a title surfaces, the gate now requires ONLY a non-empty name. Accessory,
+// out-of-stock, and relevance filters are intentionally bypassed. The price-floor
+// is still enforced AFTER parsing in normalizeProducts (price > 0 sanity).
+// TODO(post-debug): re-enable isAccessory + validateRelevance once stores stabilize.
+function acceptItem(name: string, _specs: string | undefined, _query: string, _storeName: string): number | null {
+  if (!name || !String(name).trim()) return null
+  return 50 // neutral relevance — keeps downstream sorting stable
 }
 
 function normalizeProducts(items: Partial<RawProduct>[], storeName: string, query: string): RawProduct[] {
@@ -506,7 +503,7 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string, quer
     scored.push({ item: p, score })
   }
   return scored
-    .slice(0, 5)
+    .slice(0, 10)
     .map(({ item: p, score }) => {
       const parsed = parsePrice(p.price as any)
       return {
@@ -521,7 +518,7 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string, quer
         confidenceScore: score,
       }
     })
-    .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
+    .filter(p => (p.price as number) > 0)
 }
 
 // ════════════════════════════════════════════════════════════════════
