@@ -1869,6 +1869,8 @@ Deno.serve(async (req) => {
       used_query: usedQuery,
       benchmark,
       debug: __lastDebug[store] || null,
+      raw_items_found: storeDebug?.raw_items_found ?? products.length,
+      items_returned: products.length,
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (error) {
     // Outer catch — even an unexpected crash MUST leave a PIPELINE_TRACE.
