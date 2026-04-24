@@ -62,7 +62,7 @@ export default function Benchmark() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button onClick={run} disabled={loading}>
+            <Button onClick={run} disabled={loading || loadingV2}>
               {loading ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -73,9 +73,23 @@ export default function Benchmark() {
               )}
             </Button>
             <Button
+              onClick={runV2}
+              disabled={loading || loadingV2}
+              variant="outline"
+            >
+              {loadingV2 ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Probing 4 stores…
+                </>
+              ) : (
+                'Run Benchmark V2 (New Stores)'
+              )}
+            </Button>
+            <Button
               variant="secondary"
               onClick={copy}
-              disabled={!output}
+              disabled={!output || loading || loadingV2}
             >
               {copied ? (
                 <>
