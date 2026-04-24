@@ -8,7 +8,7 @@ import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { searchStore, groupProducts, clientFilterWithFallback, getRelevantStores, type RawProduct, type Product } from '@/lib/api';
+import { searchStore, groupProducts, clientFilterWithFallback, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
 import { rankByBestValue, pickCheapestWinner } from '@/lib/decisionEngine';
 import { BestDealCard } from '@/components/BestDealCard';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
