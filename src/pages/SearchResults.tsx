@@ -36,7 +36,9 @@ const SearchResults = () => {
   }, [navigate]);
 
   const runSearch = useCallback((q: string, forceRefresh: boolean) => {
-    const storesToSearch = getRelevantStores(q);
+    // Always broadcast to all 5 stores so the UI can render their status
+    // (loading / success / empty / failed) deterministically — no hidden stores.
+    const storesToSearch = [...ALL_STORES];
     setActiveStores(storesToSearch);
     setProducts([]);
     setCompletedStores(new Map());
