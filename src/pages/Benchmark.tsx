@@ -3,21 +3,26 @@ import { Button } from '@/components/ui/button';
 import { Loader2, Copy, Check } from 'lucide-react';
 
 const FN_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/firecrawl-benchmark`;
+const FN_URL_V2 = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/stores-benchmark-v2`;
 const ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
 
 export default function Benchmark() {
   const [loading, setLoading] = useState(false);
+  const [loadingV2, setLoadingV2] = useState(false);
   const [output, setOutput] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [copied, setCopied] = useState(false);
 
-  const run = async () => {
-    setLoading(true);
+  const runUrl = async (
+    url: string,
+    setBusy: (b: boolean) => void,
+  ) => {
+    setBusy(true);
     setError('');
     setOutput('');
     setCopied(false);
     try {
-      const res = await fetch(FN_URL, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${ANON_KEY}`,
@@ -33,9 +38,12 @@ export default function Benchmark() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
+
+  const run = () => runUrl(FN_URL, setLoading);
+  const runV2 = () => runUrl(FN_URL_V2, setLoadingV2);
 
   const copy = async () => {
     await navigator.clipboard.writeText(output);
@@ -54,7 +62,7 @@ export default function Benchmark() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button onClick={run} disabled={loading}>
+            <Button onClick={run} disabled={loading || loadingV2}>
               {loading ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -65,9 +73,23 @@ export default function Benchmark() {
               )}
             </Button>
             <Button
+              onClick={runV2}
+              disabled={loading || loadingV2}
+              variant="outline"
+            >
+              {loadingV2 ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Probing 4 stores…
+                </>
+              ) : (
+                'Run Benchmark V2 (New Stores)'
+              )}
+            </Button>
+            <Button
               variant="secondary"
               onClick={copy}
-              disabled={!output}
+              disabled={!output || loading || loadingV2}
             >
               {copied ? (
                 <>
