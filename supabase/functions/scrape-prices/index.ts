@@ -1635,12 +1635,6 @@ Deno.serve(async (req) => {
     let products = pipeline.products
     const usedFallback = pipeline.usedFallback
 
-    // ── Settle credits (Firecrawl only — native is free) ──
-    if (txId) {
-      const charge = products.length > 0 ? 1 : 0
-      await settleCredits(supabaseUrl, supabaseKey, txId, charge)
-    }
-
     // Intent filter (final defense — drops cross-brand pollution missed by relevance gate).
     const beforeCount = products.length
     products = products.filter(p => matchesIntent(trimmedQuery, p.name))
