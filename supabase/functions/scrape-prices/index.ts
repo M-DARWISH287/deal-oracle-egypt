@@ -483,18 +483,15 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, timeoutMs =
   } finally { clearTimeout(timeout) }
 }
 
-// Per-item gate used by streaming scrapers: accessory + out-of-stock + relevance.
-// Returns the relevance score on accept, or null on reject.
-function acceptItem(name: string, specs: string | undefined, query: string, storeName: string): number | null {
-  const blob = `${name} ${specs || ''}`
-  if (isAccessory(blob)) return null
-  if (isOutOfStock(blob)) return null
-  const rel = validateRelevance(query, name)
-  if (!rel.isRelevant) {
-    console.log(`[${storeName}] Relevance reject: "${name.slice(0, 80)}"`)
-    return null
-  }
-  return rel.score
+// ── DEBUG MODE — Per-item gate intentionally relaxed ──
+// We are diagnosing pipeline drop-offs across the Big 5. To guarantee any product
+// with a title surfaces, the gate now requires ONLY a non-empty name. Accessory,
+// out-of-stock, and relevance filters are intentionally bypassed. The price-floor
+// is still enforced AFTER parsing in normalizeProducts (price > 0 sanity).
+// TODO(post-debug): re-enable isAccessory + validateRelevance once stores stabilize.
+function acceptItem(name: string, _specs: string | undefined, _query: string, _storeName: string): number | null {
+  if (!name || !String(name).trim()) return null
+  return 50 // neutral relevance — keeps downstream sorting stable
 }
 
 function normalizeProducts(items: Partial<RawProduct>[], storeName: string, query: string): RawProduct[] {
@@ -506,7 +503,7 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string, quer
     scored.push({ item: p, score })
   }
   return scored
-    .slice(0, 5)
+    .slice(0, 10)
     .map(({ item: p, score }) => {
       const parsed = parsePrice(p.price as any)
       return {
@@ -521,7 +518,7 @@ function normalizeProducts(items: Partial<RawProduct>[], storeName: string, quer
         confidenceScore: score,
       }
     })
-    .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
+    .filter(p => (p.price as number) > 0)
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -887,7 +884,8 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
     let scanned = 0
     let m: RegExpExecArray | null
     while ((m = itemRe.exec(html)) !== null) {
-      if (accepted.length >= 5) break
+      // DEBUG MODE: take up to 10 raw items, no acceptItem gating.
+      if (accepted.length >= 10) break
       if (++scanned > 200) break
       const b = m[0]
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
@@ -895,10 +893,9 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://2b.com.eg')
       if (!absUrl) continue
       const name = stripTags(linkMatch[2])
-
-      // Per-node gate: drop accessories + irrelevant items BEFORE price extraction.
-      const score = acceptItem(name, undefined, query, '2B Egypt')
-      if (score === null) continue
+      if (!name) continue
+      // DEBUG MODE: bypass acceptItem entirely. Keep every parsed item with title+price.
+      const score = 50
 
       const lowestPrice = extractLowestPrice(b)
       if (!lowestPrice) continue
@@ -920,7 +917,7 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
           confidenceScore: scores.get(String(p.url)) ?? 0,
         } as RawProduct
       })
-      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
+      .filter(p => (p.price as number) > 0)
   } catch (err) {
     dbg.error = err instanceof Error ? err.message : String(err)
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
@@ -1605,7 +1602,11 @@ Deno.serve(async (req) => {
           latency_ms: Date.now() - handlerStart,
           items_found: cached.results.length, success: true,
         })
-        return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({
+          success: true, products: cached.results, cached: true, store,
+          status: cached.results.length > 0 ? 'success' : 'empty',
+          cachedAt: cached.created_at,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
       }
     }
 
@@ -1672,15 +1673,20 @@ Deno.serve(async (req) => {
         latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
         error: scrapeErr instanceof Error ? scrapeErr.message : String(scrapeErr),
       })
+      const errMsg = scrapeErr instanceof Error ? scrapeErr.message : String(scrapeErr)
+      // Jumia-specific: HTTP 403 / Cloudflare → 'blocked' (no retry, deterministic).
+      const isBlocked = /BLOCKED:/i.test(errMsg) || /403/.test(errMsg) || /cloudflare/i.test(errMsg)
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
+        status: isBlocked ? 'blocked' : 'failed',
         stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
-        fallback_mandatory: true, fallback_reason: 'NATIVE_ERROR',
+        fallback_mandatory: true, fallback_reason: isBlocked ? 'BLOCKED' : 'NATIVE_ERROR',
         stages_attempted: pipeline.stages_attempted,
         semantic_intent: intent, expanded_queries_count: expanded.length,
-        error: String(scrapeErr),
+        error: errMsg,
         benchmark: errBenchmark,
+        debug: __lastDebug[store] || null,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
@@ -1779,11 +1785,20 @@ Deno.serve(async (req) => {
       success: products.length > 0,
     })
 
+    // Status derivation: 'success' if any product, 'blocked' if the per-store
+    // debug capture flagged anti-bot/Cloudflare, otherwise 'empty'.
+    const storeDebug = __lastDebug[store]
+    const wasBlocked = !!(storeDebug && storeDebug.detected_block) ||
+      pipeline.fallback_reason === 'BLOCKED'
+    const finalStatus: 'success' | 'empty' | 'blocked' =
+      products.length > 0 ? 'success' : wasBlocked ? 'blocked' : 'empty'
+
     return new Response(JSON.stringify({
       success: true,
       products,
       cached: false,
       store,
+      status: finalStatus,
       usedFallback,
       stage_used: pipeline.stage_used,
       stages_attempted: pipeline.stages_attempted,

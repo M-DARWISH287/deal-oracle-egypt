@@ -23,7 +23,7 @@ const SearchResults = () => {
 
   const [products, setProducts] = useState<Product[]>([]);
   const [pendingStores, setPendingStores] = useState<Set<string>>(new Set());
-  const [completedStores, setCompletedStores] = useState<Map<string, { count: number; cached: boolean }>>(new Map());
+  const [completedStores, setCompletedStores] = useState<Map<string, { count: number; cached: boolean; status: 'success' | 'empty' | 'blocked' | 'failed' }>>(new Map());
   const [hasStarted, setHasStarted] = useState(false);
   const [priceRange, setPriceRange] = useState<[number, number]>([0, 999999]);
   const [activeStores, setActiveStores] = useState<string[]>([]);
@@ -63,9 +63,14 @@ const SearchResults = () => {
           setCompletedStores(prev => new Map(prev).set(store, {
             count: result.products.length,
             cached: result.cached,
+            status: 'success',
           }));
         } else {
-          setCompletedStores(prev => new Map(prev).set(store, { count: 0, cached: false }));
+          setCompletedStores(prev => new Map(prev).set(store, {
+            count: 0,
+            cached: false,
+            status: result.status ?? (result.success ? 'empty' : 'failed'),
+          }));
         }
         setPendingStores(prev => {
           const next = new Set(prev);
@@ -191,20 +196,35 @@ const SearchResults = () => {
             {activeStores.map((store) => {
               const done = completedStores.get(store);
               const isPending = pendingStores.has(store);
+              const status = done?.status;
+              const chipClass = isPending
+                ? 'bg-purple-50 text-purple-400 animate-pulse'
+                : status === 'success'
+                  ? 'bg-emerald-50 text-emerald-600 border border-emerald-200'
+                  : status === 'blocked'
+                    ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                    : status === 'failed'
+                      ? 'bg-red-50 text-red-600 border border-red-200'
+                      : 'bg-secondary text-muted-foreground/70 border border-border';
+              const label = isPending
+                ? store
+                : status === 'blocked'
+                  ? `${store} · ${lang === 'ar' ? 'محجوب' : 'Blocked'}`
+                  : status === 'failed'
+                    ? `${store} · ${lang === 'ar' ? 'فشل' : 'Failed'}`
+                    : status === 'empty'
+                      ? `${store} · ${lang === 'ar' ? 'لا نتائج' : 'No results'}`
+                      : store;
               return (
                 <span
                   key={store}
-                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-all duration-300 ${
-                    isPending
-                      ? 'bg-purple-50 text-purple-400 animate-pulse'
-                      : done && done.count > 0
-                      ? 'bg-emerald-50 text-emerald-600 border border-emerald-200'
-                      : 'bg-secondary text-muted-foreground/50'
-                  }`}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-all duration-300 ${chipClass}`}
                 >
                   {isPending && <Loader2 className="h-3 w-3 animate-spin" />}
-                  {!isPending && done && done.count > 0 && <CheckCircle2 className="h-3 w-3" />}
-                  {store}
+                  {!isPending && status === 'success' && <CheckCircle2 className="h-3 w-3" />}
+                  {!isPending && status === 'blocked' && <AlertTriangle className="h-3 w-3" />}
+                  {!isPending && status === 'failed' && <AlertTriangle className="h-3 w-3" />}
+                  {label}
                   {done?.cached && <span className="text-[10px] opacity-60">⚡</span>}
                 </span>
               );

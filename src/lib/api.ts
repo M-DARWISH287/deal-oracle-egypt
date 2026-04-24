@@ -43,6 +43,8 @@ export interface Product {
 export interface StoreSearchResult {
   success: boolean; products: RawProduct[]; cached: boolean;
   store: string; cachedAt?: string; error?: string;
+  /** Debug-mode pipeline status: 'success' | 'empty' | 'blocked' | 'failed' */
+  status?: 'success' | 'empty' | 'blocked' | 'failed';
 }
 
 // ── localStorage Cache (Layer 1) ──
@@ -88,7 +90,7 @@ export async function searchStore(
   if (!forceRefresh) {
     const localCached = getLocalCache(query, store);
     if (localCached) {
-      return { success: true, products: localCached, cached: true, store, cachedAt: 'local' };
+      return { success: true, products: localCached, cached: true, store, status: 'success', cachedAt: 'local' };
     }
   } else {
     try { localStorage.removeItem(getLocalCacheKey(query, store)); } catch { /* ignore */ }
