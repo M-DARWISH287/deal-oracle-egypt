@@ -1568,8 +1568,6 @@ Deno.serve(async (req) => {
     // ── DETERMINISTIC 3-STAGE RETRIEVAL — driven by semantic-expanded queries ──
     const requestStart = Date.now()
     const config = STORE_CONFIGS[store]
-    const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
-    let txId: string | null = null
 
     let pipeline: PipelineResult = {
       products: [], stage_used: 'FAIL', stages_attempted: [], attempts: 0,
@@ -1578,18 +1576,11 @@ Deno.serve(async (req) => {
     }
     let usedQuery = trimmedQuery
     try {
-      // Production budget: ONE variant per store. Looping expansions blew the
-      // 6s budget badly (each variant could trigger Stage1+Firecrawl).
+      // Production budget: ONE variant per store. Native-only pipeline.
       for (const variant of expanded.slice(0, 1)) {
         const elapsed = Date.now() - requestStart
         if (elapsed > MAX_TOTAL_MS - 1000) break
-        const res = await runRetrievalPipeline(config, variant, store, firecrawlKey, {
-          reserveFirecrawlCredit: async () => {
-            if (!user_id) return true
-            txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, variant)
-            return !!txId
-          },
-        })
+        const res = await runRetrievalPipeline(config, variant, store)
         pipeline = {
           products: res.products,
           stage_used: res.stage_used,
@@ -1606,7 +1597,6 @@ Deno.serve(async (req) => {
         if (res.products.length > 0) break
       }
     } catch (scrapeErr) {
-      if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
       console.error(`[${store}] Pipeline error:`, scrapeErr)
       const errLatency = Date.now() - requestStart
       const errBenchmark = runBenchmark({
