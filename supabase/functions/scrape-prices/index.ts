@@ -884,7 +884,8 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
     let scanned = 0
     let m: RegExpExecArray | null
     while ((m = itemRe.exec(html)) !== null) {
-      if (accepted.length >= 5) break
+      // DEBUG MODE: take up to 10 raw items, no acceptItem gating.
+      if (accepted.length >= 10) break
       if (++scanned > 200) break
       const b = m[0]
       const linkMatch = b.match(/<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
@@ -892,10 +893,9 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
       const absUrl = toAbsoluteUrl(linkMatch[1], 'https://2b.com.eg')
       if (!absUrl) continue
       const name = stripTags(linkMatch[2])
-
-      // Per-node gate: drop accessories + irrelevant items BEFORE price extraction.
-      const score = acceptItem(name, undefined, query, '2B Egypt')
-      if (score === null) continue
+      if (!name) continue
+      // DEBUG MODE: bypass acceptItem entirely. Keep every parsed item with title+price.
+      const score = 50
 
       const lowestPrice = extractLowestPrice(b)
       if (!lowestPrice) continue
@@ -917,7 +917,7 @@ async function scrape2B(query: string, _stage: ScrapeStage = 1): Promise<RawProd
           confidenceScore: scores.get(String(p.url)) ?? 0,
         } as RawProduct
       })
-      .filter(p => (p.price as number) >= MINIMUM_PRICE_THRESHOLD)
+      .filter(p => (p.price as number) > 0)
   } catch (err) {
     dbg.error = err instanceof Error ? err.message : String(err)
     console.error(`[2B native] error:`, err instanceof Error ? err.message : err)
