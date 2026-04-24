@@ -1743,6 +1743,8 @@ Deno.serve(async (req) => {
         error: errMsg,
         benchmark: errBenchmark,
         debug: __lastDebug[store] || null,
+        raw_items_found: __lastDebug[store]?.raw_items_found ?? 0,
+        items_returned: 0,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
