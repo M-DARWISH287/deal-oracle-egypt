@@ -55,12 +55,10 @@ const STORE_TIMEOUT_MS = 15000
 // (Stage 2/RETRY disabled, Stage 3/FIRECRAWL disabled), so this is the per-store cap.
 const STAGE1_TIMEOUT_MS = 5000
 const STAGE2_TIMEOUT_MS = 0       // RETRY DISABLED — 6s budget cannot afford a second native attempt
-const FIRECRAWL_TIMEOUT_MS = 5000 // hard ceiling (was 90s — main latency offender)
-// PHASE-3 HARD RULE (Big-5 stabilization): No Firecrawl fallback, no retry loops.
-// Each store gets ONE native attempt within its per-store timeout, then we exit.
-// If a store cannot deliver (blocked, empty, error) we surface that status so the
-// UI can reflect partial success instead of waiting on doomed retries.
-const FIRECRAWL_FALLBACK_ENABLED = false
+// PHASE-3 HARD RULE (Big-5 stabilization, resource audit 2026-04):
+// No Firecrawl fallback. Each store gets ONE native attempt within its
+// per-store timeout, then we exit. The Firecrawl integration was removed
+// to stop background credit drain — see /benchmark for the standalone tester.
 // Global budget per request (Part 10): if pipeline exceeds this, we stop and return what we have.
 const MAX_TOTAL_MS = 6000
 
@@ -141,13 +139,24 @@ async function raceWithTimeoutTraced<T>(
   p: Promise<T[]>, timeoutMs: number, label: string,
 ): Promise<StageOutcome<T>> {
   let timedOut = false
-  const timeoutPromise = new Promise<T[]>((resolve) => setTimeout(() => {
-    timedOut = true
-    console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage (TIMEOUT)`)
-    resolve([])
-  }, timeoutMs))
+  // PROD HARDENING (resource audit): always clear the timer when the real
+  // promise wins the race so the timeout callback doesn't keep the isolate
+  // alive after the response is sent. Previously the unused timer + the
+  // losing scraper kept consuming compute past the per-stage budget.
+  let timerId: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<T[]>((resolve) => {
+    timerId = setTimeout(() => {
+      timedOut = true
+      console.log(`[${label}] exceeded ${timeoutMs}ms — aborting stage (TIMEOUT)`)
+      resolve([])
+    }, timeoutMs)
+  })
   try {
     const products = await Promise.race([p, timeoutPromise])
+    if (timerId !== undefined) clearTimeout(timerId)
+    // Detach any rejection from the losing scraper so it doesn't surface as an
+    // unhandled rejection after we've already returned.
+    p.catch(() => { /* swallowed — stage already resolved via race */ })
     if (timedOut) return { products: [], failure: 'TIMEOUT' }
     if (!Array.isArray(products)) {
       console.warn(`[${label}] returned non-array — INVALID_RESPONSE`)
@@ -155,6 +164,7 @@ async function raceWithTimeoutTraced<T>(
     }
     return { products, failure: products.length === 0 ? 'EMPTY_RESULT' : null }
   } catch (err) {
+    if (timerId !== undefined) clearTimeout(timerId)
     const msg = err instanceof Error ? err.message : String(err)
     // Scrapers signal anti-bot blocks by throwing `BLOCKED: <reason>`.
     if (msg.startsWith('BLOCKED:')) {
@@ -1226,87 +1236,13 @@ const STORE_CONFIGS: Record<string, StoreConfig> = {
   console.log(`[STORE_REGISTRY] OK — ${Object.keys(STORE_CONFIGS).length} stores wired: ${Object.keys(STORE_CONFIGS).join(', ')}`)
 })()
 
-// ── Scraper: Firecrawl (Stage 3 multi-strategy fallback) ──
-// Attempt 1 (stage 1): waitFor=5000, NO scroll — fastest path, works for static SSR pages.
-// Attempt 2 (stage 2): waitFor=9000 + scroll actions + alternative selector prompt — for
-// lazy-loaded SPA grids that need user interaction to hydrate.
-async function callFirecrawlOnce(
-  storeName: string, query: string, searchUrl: string, firecrawlKey: string,
-  opts: { waitFor: number; alternate: boolean; scroll: boolean },
-): Promise<any[]> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT_MS)
-  try {
-    const actions = opts.scroll
-      ? [
-          { type: 'wait', milliseconds: opts.waitFor },
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 1500 },
-          { type: 'scroll', direction: 'down' },
-          { type: 'wait', milliseconds: 1500 },
-        ]
-      : [{ type: 'wait', milliseconds: opts.waitFor }]
-
-    const promptBase = `Extract top 5 product listings from this ${storeName} search page for "${query}". Only actual products (no accessories, no out-of-stock, no banners). For price use the active selling price (ignore crossed-out original price).`
-    const promptAlt = `${promptBase} Look specifically inside the product grid (selectors like .product-item, [data-component-type="s-search-result"], .productContainer, [data-qa="product-block"]). Skip recommendation carousels, sponsored ads, and "you might also like" sections.`
-
-    const response = await fetch('https://api.firecrawl.dev/v2/scrape', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${firecrawlKey}`, 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        url: searchUrl,
-        formats: [{
-          type: 'json',
-          schema: {
-            type: 'object',
-            properties: {
-              products: {
-                type: 'array', items: {
-                  type: 'object',
-                  properties: {
-                    name: { type: 'string' }, name_ar: { type: 'string' },
-                    price: { type: 'string' }, url: { type: 'string' },
-                    image: { type: 'string' }, specs: { type: 'string' },
-                  },
-                  required: ['name', 'price', 'url'],
-                },
-              },
-            },
-            required: ['products'],
-          },
-          prompt: opts.alternate ? promptAlt : promptBase,
-        }],
-        actions,
-        waitFor: opts.waitFor,
-        onlyMainContent: false,
-        // Match our Deno-side abort budget so Firecrawl doesn't keep working past our cap.
-        timeout: FIRECRAWL_TIMEOUT_MS,
-      }),
-    })
-    const data = await response.json()
-    if (!response.ok) {
-      console.error(`[Firecrawl] ${storeName} HTTP ${response.status}:`, JSON.stringify(data).slice(0, 200))
-      return []
-    }
-    return data?.data?.json?.products || data?.json?.products
-        || data?.data?.extract?.products || data?.extract?.products || []
-  } finally { clearTimeout(timeout) }
-}
-
-async function scrapeWithFirecrawl(query: string, storeName: string, searchUrl: string, firecrawlKey: string): Promise<RawProduct[]> {
-  try {
-    // Single attempt under the hard 4s ceiling — no retry, no scroll loop.
-    // Production budget cannot afford two Firecrawl calls; if it fails, return [].
-    const waitFor = Math.min(2000, Math.floor(FIRECRAWL_TIMEOUT_MS / 2))
-    const products = await callFirecrawlOnce(storeName, query, searchUrl, firecrawlKey, { waitFor, alternate: false, scroll: false })
-    console.log(`[Firecrawl] ${storeName}: returned ${products.length} raw products (waitFor=${waitFor}ms, single attempt)`)
-    return normalizeProducts(products, storeName, query)
-  } catch (err) {
-    console.error(`[Firecrawl] ${storeName}: ${err instanceof Error && err.name === 'AbortError' ? 'timeout' : err}`)
-    return []
-  }
-}
+// ── Firecrawl Stage-3 fallback REMOVED (resource audit 2026-04) ──
+// The entire callFirecrawlOnce / scrapeWithFirecrawl / runStage3_Firecrawl
+// pipeline was deleted to eliminate background Firecrawl traffic and credit
+// burn. The Big-5 native scrapers run exactly once per request under their
+// per-store timeout. The standalone /benchmark page (firecrawl-benchmark
+// edge function) remains the only path that talks to Firecrawl, and only
+// when manually triggered by an operator.
 
 // ════════════════════════════════════════════════════════════════════
 // ── DETERMINISTIC 3-STAGE RETRIEVAL ENGINE ──
@@ -1387,29 +1323,7 @@ async function runStage2_Retry(
   }
 }
 
-async function runStage3_Firecrawl(
-  query: string, store: string, searchUrl: string, firecrawlKey: string,
-): Promise<StageResult> {
-  const t0 = Date.now()
-  let raw: RawProduct[] = []
-  let failureBase: FallbackReason | null = null
-  try {
-    raw = await scrapeWithFirecrawl(query, store, searchUrl, firecrawlKey)
-    if (!Array.isArray(raw)) { failureBase = 'INVALID_RESPONSE'; raw = [] }
-  } catch (err) {
-    console.error(`[${store}] Stage 3 (FIRECRAWL) threw — NATIVE_ERROR:`, err instanceof Error ? err.message : err)
-    failureBase = 'NATIVE_ERROR'
-  }
-  const { valid, avgRelevance, invalidCount } = assessQuality(raw, query)
-  const ok = valid.length > 0
-  return {
-    products: valid, rawCount: raw.length, avgRelevance, invalidCount,
-    latencyMs: Date.now() - t0, ok,
-    failure: ok ? null : (failureBase ?? 'EMPTY_RESULT'),
-  }
-}
-
-// Top-level orchestrator (Part 1-12). Runs Stage 1 → 2 → 3 deterministically
+// Top-level orchestrator. Runs Stage 1 (native) deterministically
 // with quality gates, early exit, structured logs, and a global time budget.
 interface PipelineResult {
   products: RawProduct[]
@@ -1426,8 +1340,6 @@ interface PipelineResult {
 
 async function runRetrievalPipeline(
   config: StoreConfig, query: string, store: string,
-  firecrawlKey: string | undefined,
-  options: { reserveFirecrawlCredit: () => Promise<boolean>; },
 ): Promise<PipelineResult> {
   const t0 = Date.now()
   let stage_used: StageUsed = 'API'
@@ -1493,44 +1405,14 @@ async function runRetrievalPipeline(
   // gets one native attempt. If it fails (BLOCKED, EMPTY_RESULT, TIMEOUT, NATIVE_ERROR)
   // we surface that status and exit immediately — no second-stage retries, no Firecrawl.
   // The flag below is the single switch — flip it back on if Big-5 stops being stable.
+  // ── STAGE 3 REMOVED (resource audit 2026-04) ──
+  // Firecrawl fallback was permanently disabled (FIRECRAWL_FALLBACK_ENABLED=false)
+  // and the entire Stage-3 code path has been deleted to stop background drain.
+  // If a store fails its single native attempt we surface the cause and exit.
   const fallback_mandatory = bestProducts.length === 0
-  const NATIVE_ONLY_STORES = new Set(['Noon'])
-  if (fallback_mandatory && !FIRECRAWL_FALLBACK_ENABLED) {
+  if (fallback_mandatory) {
     fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
-    console.log(`[${store}] Stage 3 SKIPPED — FIRECRAWL_FALLBACK_ENABLED=false (Phase-3 rule). reason=${fallback_reason}`)
-  } else if (fallback_mandatory) {
-    if (NATIVE_ONLY_STORES.has(store)) {
-      fallback_reason = nativeFailureCause ?? 'EMPTY_RESULT'
-      console.log(`[${store}] Stage 3 SKIPPED — store is native-only (Firecrawl removed). reason=${fallback_reason}`)
-    } else if (!firecrawlKey) {
-      fallback_reason = 'KEY_MISSING'
-      console.warn(`[${store}] Stage 3 SKIPPED — FIRECRAWL_API_KEY not configured (fallback_reason=KEY_MISSING)`)
-    } else if (remainingMs() <= FIRECRAWL_TIMEOUT_MS) {
-      // Need at least one Firecrawl-cap worth of time before attempting it.
-      fallback_reason = 'BUDGET_EXHAUSTED'
-      console.warn(`[${store}] Stage 3 SKIPPED — only ${remainingMs()}ms remaining (fallback_reason=BUDGET_EXHAUSTED)`)
-    } else {
-      const creditOk = await options.reserveFirecrawlCredit()
-      if (!creditOk) {
-        fallback_reason = 'CREDIT_LIMIT'
-        console.warn(`[${store}] Stage 3 SKIPPED — credit reservation failed (fallback_reason=CREDIT_LIMIT)`)
-      } else {
-        attempts++
-        stages_attempted.push('FIRECRAWL')
-        const triggerReason = hasNative ? (nativeFailureCause ?? 'EMPTY_RESULT') : 'EMPTY_RESULT'
-        console.log(`[${store}] FALLBACK_TRIGGERED_FIRECRAWL trigger=${triggerReason} mandatory=true`)
-        const s3 = await runStage3_Firecrawl(query, store, config.searchUrl(query), firecrawlKey)
-        console.log(`[${store}] Stage 3 (FIRECRAWL): raw=${s3.rawCount} valid=${s3.products.length} avgRel=${s3.avgRelevance} ${s3.latencyMs}ms failure=${s3.failure ?? 'none'}`)
-        if (s3.ok) {
-          stage_used = 'FIRECRAWL'; usedFallback = true
-          bestProducts = s3.products; bestAvg = s3.avgRelevance; bestInvalid = s3.invalidCount
-          fallback_reason = 'NONE'
-        } else {
-          // Firecrawl ran but produced nothing — surface its specific failure cause.
-          fallback_reason = s3.failure ?? 'EMPTY_RESULT'
-        }
-      }
-    }
+    console.log(`[${store}] No fallback — native-only pipeline. reason=${fallback_reason}`)
   }
 
   if (bestProducts.length === 0) stage_used = 'FAIL'
@@ -1538,23 +1420,6 @@ async function runRetrievalPipeline(
   return { products: bestProducts, stage_used, stages_attempted, attempts, usedFallback,
     fallback_mandatory, fallback_reason,
     avgRelevance: bestAvg, invalidCount: bestInvalid, totalLatencyMs: elapsed() }
-}
-
-async function reserveCredits(supabaseUrl: string, serviceKey: string, userId: string, store: string, query: string): Promise<string | null> {
-  const sb = createClient(supabaseUrl, serviceKey)
-  try {
-    const { data, error } = await sb.rpc('reserve_credits', { p_user_id: userId, p_amount: 1, p_store: store, p_query: query })
-    if (error) { console.error('[Credits] Reserve failed:', error.message); return null }
-    return data as string
-  } catch (err) { console.error('[Credits] Reserve error:', err); return null }
-}
-
-async function settleCredits(supabaseUrl: string, serviceKey: string, txId: string, actualCost: number): Promise<void> {
-  const sb = createClient(supabaseUrl, serviceKey)
-  try {
-    const { error } = await sb.rpc('settle_credits', { p_tx_id: txId, p_actual_cost: actualCost })
-    if (error) console.error('[Credits] Settle failed:', error.message)
-  } catch (err) { console.error('[Credits] Settle error:', err) }
 }
 
 // ── PIPELINE_TRACE EMITTER (Part 2 — failure visibility, no silent fails) ──
@@ -1684,8 +1549,6 @@ Deno.serve(async (req) => {
     // ── DETERMINISTIC 3-STAGE RETRIEVAL — driven by semantic-expanded queries ──
     const requestStart = Date.now()
     const config = STORE_CONFIGS[store]
-    const firecrawlKey = Deno.env.get('FIRECRAWL_API_KEY')
-    let txId: string | null = null
 
     let pipeline: PipelineResult = {
       products: [], stage_used: 'FAIL', stages_attempted: [], attempts: 0,
@@ -1694,18 +1557,11 @@ Deno.serve(async (req) => {
     }
     let usedQuery = trimmedQuery
     try {
-      // Production budget: ONE variant per store. Looping expansions blew the
-      // 6s budget badly (each variant could trigger Stage1+Firecrawl).
+      // Production budget: ONE variant per store. Native-only pipeline.
       for (const variant of expanded.slice(0, 1)) {
         const elapsed = Date.now() - requestStart
         if (elapsed > MAX_TOTAL_MS - 1000) break
-        const res = await runRetrievalPipeline(config, variant, store, firecrawlKey, {
-          reserveFirecrawlCredit: async () => {
-            if (!user_id) return true
-            txId = await reserveCredits(supabaseUrl, supabaseKey, user_id, store, variant)
-            return !!txId
-          },
-        })
+        const res = await runRetrievalPipeline(config, variant, store)
         pipeline = {
           products: res.products,
           stage_used: res.stage_used,
@@ -1722,7 +1578,6 @@ Deno.serve(async (req) => {
         if (res.products.length > 0) break
       }
     } catch (scrapeErr) {
-      if (txId) await settleCredits(supabaseUrl, supabaseKey, txId, 0)
       console.error(`[${store}] Pipeline error:`, scrapeErr)
       const errLatency = Date.now() - requestStart
       const errBenchmark = runBenchmark({
@@ -1760,12 +1615,6 @@ Deno.serve(async (req) => {
 
     let products = pipeline.products
     const usedFallback = pipeline.usedFallback
-
-    // ── Settle credits (Firecrawl only — native is free) ──
-    if (txId) {
-      const charge = products.length > 0 ? 1 : 0
-      await settleCredits(supabaseUrl, supabaseKey, txId, charge)
-    }
 
     // Intent filter (final defense — drops cross-brand pollution missed by relevance gate).
     const beforeCount = products.length
