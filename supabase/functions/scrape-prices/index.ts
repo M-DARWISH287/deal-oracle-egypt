@@ -999,18 +999,33 @@ async function fetchNoonOnce(url: string, attempt: number): Promise<Response | n
 
 async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
   const tag = 'Noon native'
+  const dbg: StoreDebug = { store: 'Noon' }
+  __lastDebug['Noon'] = dbg
   const url = `https://www.noon.com/egypt-en/search/?q=${encodeURIComponent(query)}`
+  dbg.url = url
+  console.log(`[Noon] START`)
+  console.log(`[Noon] URL:`, url)
 
   // Up to 1 + NOON_MAX_RETRIES attempts with exponential backoff (200ms, 500ms).
   let html: string | null = null
   let blocked = false
+  let lastStatus = 0
+  let throwBlocked: Error | null = null
   for (let attempt = 0; attempt <= NOON_MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       const backoff = Math.min(500, 200 * 2 ** (attempt - 1))
       await new Promise(r => setTimeout(r, backoff))
     }
-    const res = await fetchNoonOnce(url, attempt)
+    let res: Response | null
+    try {
+      res = await fetchNoonOnce(url, attempt)
+    } catch (err) {
+      // BLOCKED throw from fetchNoonOnce — capture and break (no point retrying).
+      throwBlocked = err instanceof Error ? err : new Error(String(err))
+      break
+    }
     if (!res) continue
+    lastStatus = res.status
     if (res.status === 403) {
       // Akamai datacenter block — retrying won't help, but we let the loop finish
       // so the LAST attempt's body can be inspected for Access Denied confirmation.
@@ -1031,10 +1046,29 @@ async function scrapeNoonNative(query: string): Promise<RawProduct[]> {
       continue
     }
   }
+  dbg.status = lastStatus
+  if (throwBlocked) {
+    dbg.detected_block = true
+    dbg.block_signal = 'HTTP/2 stream reset (Akamai TLS fingerprint)'
+    dbg.error = throwBlocked.message
+    console.log(`[Noon] BLOCKED: ${throwBlocked.message}`)
+    throw throwBlocked
+  }
   if (blocked || (html && /<TITLE>Access Denied<\/TITLE>/i.test(html))) {
+    dbg.detected_block = true
+    dbg.block_signal = blocked ? 'HTTP 403' : 'Access Denied page'
     throw new Error('BLOCKED: Noon Akamai 403 / Access Denied (datacenter IP)')
   }
-  if (!html) { console.warn(`[${tag}] all ${NOON_MAX_RETRIES + 1} attempts failed`); return [] }
+  if (!html) {
+    console.warn(`[${tag}] all ${NOON_MAX_RETRIES + 1} attempts failed`)
+    // No HTML received and no explicit 403 — still effectively blocked at network layer.
+    dbg.detected_block = true
+    dbg.block_signal = 'no response body after retries'
+    throw new Error('BLOCKED: Noon — no HTML response after retries (datacenter network rejection)')
+  }
+  dbg.html_length = html.length
+  console.log(`[Noon] html length:`, html.length)
+  dbg.detected_block = false
 
   // ── Strategy A: __NEXT_DATA__ JSON blob (most reliable) ──
   const hits: NoonHit[] = []
