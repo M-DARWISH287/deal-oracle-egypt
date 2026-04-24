@@ -23,7 +23,7 @@ const SearchResults = () => {
 
   const [products, setProducts] = useState<Product[]>([]);
   const [pendingStores, setPendingStores] = useState<Set<string>>(new Set());
-  const [completedStores, setCompletedStores] = useState<Map<string, { count: number; cached: boolean }>>(new Map());
+  const [completedStores, setCompletedStores] = useState<Map<string, { count: number; cached: boolean; status: 'success' | 'empty' | 'blocked' | 'failed' }>>(new Map());
   const [hasStarted, setHasStarted] = useState(false);
   const [priceRange, setPriceRange] = useState<[number, number]>([0, 999999]);
   const [activeStores, setActiveStores] = useState<string[]>([]);
@@ -63,9 +63,14 @@ const SearchResults = () => {
           setCompletedStores(prev => new Map(prev).set(store, {
             count: result.products.length,
             cached: result.cached,
+            status: 'success',
           }));
         } else {
-          setCompletedStores(prev => new Map(prev).set(store, { count: 0, cached: false }));
+          setCompletedStores(prev => new Map(prev).set(store, {
+            count: 0,
+            cached: false,
+            status: result.status ?? (result.success ? 'empty' : 'failed'),
+          }));
         }
         setPendingStores(prev => {
           const next = new Set(prev);
