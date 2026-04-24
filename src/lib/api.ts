@@ -90,7 +90,7 @@ export async function searchStore(
   if (!forceRefresh) {
     const localCached = getLocalCache(query, store);
     if (localCached) {
-      return { success: true, products: localCached, cached: true, store, cachedAt: 'local' };
+      return { success: true, products: localCached, cached: true, store, status: 'success', cachedAt: 'local' };
     }
   } else {
     try { localStorage.removeItem(getLocalCacheKey(query, store)); } catch { /* ignore */ }
