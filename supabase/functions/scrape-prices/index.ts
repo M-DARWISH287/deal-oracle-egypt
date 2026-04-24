@@ -1602,7 +1602,11 @@ Deno.serve(async (req) => {
           latency_ms: Date.now() - handlerStart,
           items_found: cached.results.length, success: true,
         })
-        return new Response(JSON.stringify({ success: true, products: cached.results, cached: true, store, cachedAt: cached.created_at }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({
+          success: true, products: cached.results, cached: true, store,
+          status: cached.results.length > 0 ? 'success' : 'empty',
+          cachedAt: cached.created_at,
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
       }
     }
 
