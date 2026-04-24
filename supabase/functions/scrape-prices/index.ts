@@ -1669,15 +1669,20 @@ Deno.serve(async (req) => {
         latency_ms: Date.now() - handlerStart, items_found: 0, success: false,
         error: scrapeErr instanceof Error ? scrapeErr.message : String(scrapeErr),
       })
+      const errMsg = scrapeErr instanceof Error ? scrapeErr.message : String(scrapeErr)
+      // Jumia-specific: HTTP 403 / Cloudflare → 'blocked' (no retry, deterministic).
+      const isBlocked = /BLOCKED:/i.test(errMsg) || /403/.test(errMsg) || /cloudflare/i.test(errMsg)
       return new Response(JSON.stringify({
         success: true, products: [], cached: false, store,
+        status: isBlocked ? 'blocked' : 'failed',
         stage_used: 'FAIL', attempts: 0, latency_ms: errLatency,
         avg_relevance_score: 0, invalid_items_count: 0, usedFallback: false,
-        fallback_mandatory: true, fallback_reason: 'NATIVE_ERROR',
+        fallback_mandatory: true, fallback_reason: isBlocked ? 'BLOCKED' : 'NATIVE_ERROR',
         stages_attempted: pipeline.stages_attempted,
         semantic_intent: intent, expanded_queries_count: expanded.length,
-        error: String(scrapeErr),
+        error: errMsg,
         benchmark: errBenchmark,
+        debug: __lastDebug[store] || null,
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
