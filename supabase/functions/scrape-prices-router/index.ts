@@ -438,10 +438,11 @@ Deno.serve(async (req: Request) => {
         continue;
       }
       const fn = strategy === 'NATIVE' ? scrapeNative : scrapeFirecrawl;
+      const cap = strategy === 'NATIVE' ? NATIVE_TIMEOUT_MS : FIRECRAWL_TIMEOUT_MS;
       tasks.push({
         store,
         strategy,
-        promise: withTimeout(fn(store, query), GLOBAL_TIMEOUT_MS, store),
+        promise: withTimeout(fn(store, query), cap, store),
       });
     }
 
