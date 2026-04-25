@@ -47,6 +47,128 @@ export interface StoreSearchResult {
   status?: 'success' | 'empty' | 'blocked' | 'failed';
 }
 
+// ════════════════════════════════════════════════════════════════════
+// NDJSON STREAM CONSUMER
+// ────────────────────────────────────────────────────────────────────
+// Talks to `scrape-prices-router`, which streams one JSON object per line.
+// Each line shape (from the edge function):
+//   { store: string; strategy: 'NATIVE' | 'FIRECRAWL';
+//     status: 'success' | 'error'; products?: RawProduct[]; error?: string }
+// We accumulate raw bytes into a string buffer and split on `\n` so a
+// single network chunk can safely contain partial / multiple lines.
+// ════════════════════════════════════════════════════════════════════
+
+export interface StreamLine {
+  store: string;
+  strategy?: 'NATIVE' | 'FIRECRAWL';
+  status: 'success' | 'error' | 'empty' | 'blocked' | 'failed';
+  products: RawProduct[];
+  error?: string;
+  latencyMs?: number;
+}
+
+export interface StreamSearchHandlers {
+  /** Called once per parsed NDJSON line. */
+  onLine: (line: StreamLine) => void;
+  /** Called once when the stream finishes (cleanly or via error). */
+  onDone?: (info: { aborted: boolean; error?: string }) => void;
+  /** Optional: AbortSignal to cancel the in-flight fetch. */
+  signal?: AbortSignal;
+}
+
+function buildRouterUrl(): string {
+  const base = import.meta.env.VITE_SUPABASE_URL as string;
+  return `${base}/functions/v1/scrape-prices-router`;
+}
+
+/**
+ * Streams search results from the router. Resolves when the stream closes.
+ * Never throws on per-line parse failures — those are logged and skipped so
+ * one malformed chunk can't take down the UI.
+ */
+export async function streamSearch(
+  query: string,
+  handlers: StreamSearchHandlers,
+): Promise<void> {
+  const apikey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
+  let aborted = false;
+  try {
+    const res = await fetch(buildRouterUrl(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey,
+        Authorization: `Bearer ${apikey}`,
+      },
+      body: JSON.stringify({ query }),
+      signal: handlers.signal,
+    });
+
+    if (!res.ok || !res.body) {
+      const errText = await res.text().catch(() => '');
+      handlers.onDone?.({ aborted: false, error: `HTTP ${res.status}: ${errText}` });
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Split on newline; the last (possibly partial) segment stays in buffer.
+      let nlIdx: number;
+      while ((nlIdx = buffer.indexOf('\n')) !== -1) {
+        const rawLine = buffer.slice(0, nlIdx).trim();
+        buffer = buffer.slice(nlIdx + 1);
+        if (!rawLine) continue;
+        try {
+          const parsed = JSON.parse(rawLine) as Partial<StreamLine>;
+          handlers.onLine({
+            store: parsed.store ?? 'Unknown',
+            strategy: parsed.strategy,
+            status: (parsed.status as StreamLine['status']) ?? 'empty',
+            products: Array.isArray(parsed.products) ? parsed.products : [],
+            error: parsed.error,
+            latencyMs: parsed.latencyMs,
+          });
+        } catch (err) {
+          console.warn('[streamSearch] Skipping malformed NDJSON line:', rawLine, err);
+        }
+      }
+    }
+
+    // Flush any trailing line without a newline terminator.
+    const tail = buffer.trim();
+    if (tail) {
+      try {
+        const parsed = JSON.parse(tail) as Partial<StreamLine>;
+        handlers.onLine({
+          store: parsed.store ?? 'Unknown',
+          strategy: parsed.strategy,
+          status: (parsed.status as StreamLine['status']) ?? 'empty',
+          products: Array.isArray(parsed.products) ? parsed.products : [],
+          error: parsed.error,
+          latencyMs: parsed.latencyMs,
+        });
+      } catch (err) {
+        console.warn('[streamSearch] Skipping malformed trailing line:', tail, err);
+      }
+    }
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'AbortError') {
+      aborted = true;
+    } else {
+      handlers.onDone?.({ aborted: false, error: String(err) });
+      return;
+    }
+  }
+  handlers.onDone?.({ aborted });
+}
+
 // ── localStorage Cache (Layer 1) ──
 const LOCAL_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
