@@ -8,11 +8,24 @@ import { LanguageToggle } from '@/components/LanguageToggle';
 import { RegionSwitcher } from '@/components/RegionSwitcher';
 import { useLanguage } from '@/i18n/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { searchStore, groupProducts, clientFilterWithFallback, ALL_STORES, type RawProduct, type Product } from '@/lib/api';
+import { streamSearch, groupProducts, clientFilterWithFallback, type RawProduct, type Product } from '@/lib/api';
 import { rankByBestValue, pickCheapestWinner } from '@/lib/decisionEngine';
 import { BestDealCard } from '@/components/BestDealCard';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+
+// Stores the router actually scrapes (matches ROUTING_MATRIX in
+// `supabase/functions/scrape-prices-router/index.ts`, excluding SKIP entries).
+const ROUTER_STORES = [
+  'El Shennawy',
+  'Amazon Egypt',
+  'Jumia',
+  '2B Egypt',
+  'Cairo Sales',
+  'Raya Shop',
+  'Tradeline',
+  'Carrefour Egypt',
+] as const;
 
 const SearchResults = () => {
   const [searchParams] = useSearchParams();
@@ -30,15 +43,19 @@ const SearchResults = () => {
   const [storeFilter, setStoreFilter] = useState<string | null>(null);
   const [showMore, setShowMore] = useState(false);
   const allProductsRef = useRef<RawProduct[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
 
   const handleSearch = useCallback((newQuery: string) => {
     navigate(`/search?q=${encodeURIComponent(newQuery)}`);
   }, [navigate]);
 
-  const runSearch = useCallback((q: string, forceRefresh: boolean) => {
-    // Always broadcast to all 5 stores so the UI can render their status
-    // (loading / success / empty / failed) deterministically — no hidden stores.
-    const storesToSearch = [...ALL_STORES];
+  const runSearch = useCallback((q: string, _forceRefresh: boolean) => {
+    // Cancel any in-flight stream from a previous query.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const storesToSearch = [...ROUTER_STORES];
     setActiveStores(storesToSearch);
     setProducts([]);
     setCompletedStores(new Map());
@@ -47,10 +64,13 @@ const SearchResults = () => {
     setPriceRange([0, 999999]);
     setPendingStores(new Set(storesToSearch));
 
-    storesToSearch.forEach((store) => {
-      searchStore(q, store, forceRefresh).then((result) => {
-        if (result.success && result.products.length > 0) {
-          allProductsRef.current = [...allProductsRef.current, ...result.products];
+    streamSearch(q, {
+      signal: controller.signal,
+      onLine: (line) => {
+        const hasProducts = line.status === 'success' && line.products.length > 0;
+        if (hasProducts) {
+          // Append, then re-group + re-sort the entire aggregate.
+          allProductsRef.current = [...allProductsRef.current, ...line.products];
           const grouped = groupProducts(allProductsRef.current);
           setProducts(grouped);
           const allPrices = grouped.flatMap(p => p.offers.map(o => o.price));
@@ -60,26 +80,50 @@ const SearchResults = () => {
               Math.max(prev[1] === 999999 ? 0 : prev[1], Math.ceil(Math.max(...allPrices))),
             ]);
           }
-          setCompletedStores(prev => new Map(prev).set(store, {
-            count: result.products.length,
-            cached: result.cached,
-            status: 'success',
-          }));
-        } else {
-          setCompletedStores(prev => new Map(prev).set(store, {
-            count: 0,
-            cached: false,
-            status: result.status ?? (result.success ? 'empty' : 'failed'),
-          }));
         }
+
+        const normalizedStatus: 'success' | 'empty' | 'blocked' | 'failed' =
+          hasProducts
+            ? 'success'
+            : line.status === 'error' || line.status === 'failed'
+              ? 'failed'
+              : line.status === 'blocked'
+                ? 'blocked'
+                : 'empty';
+
+        setCompletedStores(prev => new Map(prev).set(line.store, {
+          count: line.products.length,
+          cached: false,
+          status: normalizedStatus,
+        }));
         setPendingStores(prev => {
           const next = new Set(prev);
-          next.delete(store);
+          next.delete(line.store);
           return next;
         });
-      });
+      },
+      onDone: ({ aborted, error }) => {
+        if (aborted) return;
+        if (error) console.error('[streamSearch] stream error:', error);
+        // Mark any stragglers (timed out / never reported) as failed so the
+        // UI doesn't show a stale "loading" chip forever.
+        setPendingStores(prev => {
+          if (prev.size === 0) return prev;
+          setCompletedStores(c => {
+            const next = new Map(c);
+            for (const s of prev) {
+              if (!next.has(s)) next.set(s, { count: 0, cached: false, status: 'failed' });
+            }
+            return next;
+          });
+          return new Set();
+        });
+      },
     });
   }, [user?.id]);
+
+  // Cancel the stream if the user navigates away mid-search.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   useEffect(() => {
     if (!query) return;
