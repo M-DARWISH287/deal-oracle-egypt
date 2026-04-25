@@ -19,6 +19,101 @@ export interface Product {
 
 type StoreStrategy = 'NATIVE' | 'FIRECRAWL' | 'SKIP';
 
+// ---------- Cache config ----------
+// Postgres `search_cache` table (already provisioned): query TEXT, results JSONB,
+// expires_at TIMESTAMPTZ. We store an array of per-store success entries —
+// each entry mirrors the NDJSON line we'd otherwise stream live. On cache hit
+// we replay those entries as NDJSON so the frontend contract is unchanged.
+const CACHE_TTL_HOURS = 6;
+
+interface CachedStoreEntry {
+  store: string;
+  strategy: StoreStrategy;
+  status: 'success';
+  count: number;
+  latencyMs: number;
+  products: Product[];
+}
+
+function normalizeCacheKey(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+async function readCache(key: string): Promise<CachedStoreEntry[] | null> {
+  const url = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !serviceKey) return null;
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/search_cache?query=eq.${encodeURIComponent(key)}` +
+        `&expires_at=gt.${encodeURIComponent(new Date().toISOString())}` +
+        `&select=results,expires_at&limit=1`,
+      {
+        headers: {
+          apikey: serviceKey,
+          Authorization: `Bearer ${serviceKey}`,
+        },
+      },
+    );
+    if (!res.ok) {
+      console.log(`[CACHE] read HTTP ${res.status}`);
+      return null;
+    }
+    const rows = (await res.json()) as Array<{ results: unknown }>;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const results = rows[0].results;
+    if (!Array.isArray(results) || results.length === 0) return null;
+    return results as CachedStoreEntry[];
+  } catch (err) {
+    console.log(`[CACHE] read error: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+async function writeCache(key: string, entries: CachedStoreEntry[]): Promise<void> {
+  if (entries.length === 0) {
+    console.log('[CACHE] skip write — zero successful stores (no poisoning)');
+    return;
+  }
+  const url = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !serviceKey) return;
+  try {
+    const expiresAt = new Date(
+      Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000,
+    ).toISOString();
+    // Upsert on `query` — requires a unique constraint on search_cache.query.
+    // If absent, this falls back to insert and the `on_conflict` is ignored.
+    const res = await fetch(
+      `${url}/rest/v1/search_cache?on_conflict=query`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: serviceKey,
+          Authorization: `Bearer ${serviceKey}`,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify({
+          query: key,
+          results: entries,
+          expires_at: expiresAt,
+        }),
+      },
+    );
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.log(`[CACHE] write HTTP ${res.status} — ${txt.slice(0, 200)}`);
+    } else {
+      console.log(
+        `[CACHE] ✍️  wrote ${entries.length} store entries, ttl=${CACHE_TTL_HOURS}h`,
+      );
+    }
+  } catch (err) {
+    console.log(`[CACHE] write error: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 const ROUTING_MATRIX: Record<string, StoreStrategy> = {
   // Tier 1 — Native fetch viable & verified against live DOM
   'El Shennawy': 'NATIVE', // OpenCart, full SSR, /index.php?route=product/search
@@ -422,6 +517,7 @@ Deno.serve(async (req: Request) => {
   try {
     const body = await req.json().catch(() => ({}));
     const query = typeof body?.query === 'string' ? body.query.trim() : '';
+    const forceRefresh = body?.force_refresh === true;
     if (!query) {
       return new Response(
         JSON.stringify({ error: 'Search query is required' }),
@@ -430,6 +526,40 @@ Deno.serve(async (req: Request) => {
     }
 
     console.log(`\n🚀 ROUTER SEARCH: "${query}"`);
+    const cacheKey = normalizeCacheKey(query);
+    console.log(`[CACHE] key="${cacheKey}" forceRefresh=${forceRefresh}`);
+
+    // ---------- Cache hit → replay as NDJSON ----------
+    if (!forceRefresh) {
+      const cached = await readCache(cacheKey);
+      if (cached && cached.length > 0) {
+        console.log(`[CACHE] ✅ HIT — replaying ${cached.length} store entries`);
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const entry of cached) {
+              const line =
+                JSON.stringify({ ...entry, cached: true }) + '\n';
+              controller.enqueue(encoder.encode(line));
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/x-ndjson; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no',
+            'X-Cache': 'HIT',
+          },
+        });
+      }
+      console.log('[CACHE] ⛔ MISS — running live scrape');
+    } else {
+      console.log('[CACHE] 🔁 BYPASS (force_refresh=true) — running live scrape');
+    }
 
     // ---------- NDJSON streaming response ----------
     // Each store emits exactly one line (`{store, strategy, status, products|error}\n`)
@@ -440,6 +570,8 @@ Deno.serve(async (req: Request) => {
       start(controller) {
         const tasks: Promise<unknown>[] = [];
         const t0 = Date.now();
+        // Aggregate successful stores so we can persist after the stream closes.
+        const aggregated: CachedStoreEntry[] = [];
 
         for (const [store, strategy] of Object.entries(ROUTING_MATRIX)) {
           if (strategy === 'SKIP') {
@@ -453,6 +585,19 @@ Deno.serve(async (req: Request) => {
             .then((products) => {
               const latencyMs = Date.now() - t0;
               console.log(`[ROUTER] ✅ ${store} → ${products.length} in ${latencyMs}ms`);
+              // Cache only stores that returned at least one valid product —
+              // empty successes still count as "ran cleanly" but aren't worth
+              // locking in for 6h.
+              if (products.length > 0) {
+                aggregated.push({
+                  store,
+                  strategy,
+                  status: 'success',
+                  count: products.length,
+                  latencyMs,
+                  products,
+                });
+              }
               const line =
                 JSON.stringify({
                   store,
@@ -487,6 +632,17 @@ Deno.serve(async (req: Request) => {
         Promise.allSettled(tasks).then(() => {
           console.log(`[ROUTER] 🏁 stream closed in ${Date.now() - t0}ms`);
           controller.close();
+          // Keep the worker alive until the cache write completes — without
+          // waitUntil, the isolate may be torn down between `controller.close()`
+          // and the fetch resolving, silently dropping the upsert.
+          const writePromise = writeCache(cacheKey, aggregated).catch((err) =>
+            console.log(`[CACHE] async write failed: ${err}`),
+          );
+          // @ts-ignore — EdgeRuntime is provided by Supabase's Deno deploy runtime.
+          if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {
+            // @ts-ignore
+            EdgeRuntime.waitUntil(writePromise);
+          }
         });
       },
     });
@@ -498,6 +654,7 @@ Deno.serve(async (req: Request) => {
         'Content-Type': 'application/x-ndjson; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'X-Accel-Buffering': 'no',
+        'X-Cache': 'MISS',
       },
     });
   } catch (err) {
