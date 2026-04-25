@@ -632,10 +632,17 @@ Deno.serve(async (req: Request) => {
         Promise.allSettled(tasks).then(() => {
           console.log(`[ROUTER] 🏁 stream closed in ${Date.now() - t0}ms`);
           controller.close();
-          // Fire-and-forget cache write — never blocks the response.
-          writeCache(cacheKey, aggregated).catch((err) =>
+          // Keep the worker alive until the cache write completes — without
+          // waitUntil, the isolate may be torn down between `controller.close()`
+          // and the fetch resolving, silently dropping the upsert.
+          const writePromise = writeCache(cacheKey, aggregated).catch((err) =>
             console.log(`[CACHE] async write failed: ${err}`),
           );
+          // @ts-ignore — EdgeRuntime is provided by Supabase's Deno deploy runtime.
+          if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {
+            // @ts-ignore
+            EdgeRuntime.waitUntil(writePromise);
+          }
         });
       },
     });
