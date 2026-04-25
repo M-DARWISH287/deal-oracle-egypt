@@ -13,6 +13,7 @@ import { rankByBestValue, pickCheapestWinner } from '@/lib/decisionEngine';
 import { BestDealCard } from '@/components/BestDealCard';
 import { Zap, SearchX, CheckCircle2, Loader2, AlertTriangle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { sanitizeUrl } from '@/lib/utils';
 
 // Stores the router actually scrapes (matches ROUTING_MATRIX in
 // `supabase/functions/scrape-prices-router/index.ts`, excluding SKIP entries).
@@ -69,8 +70,12 @@ const SearchResults = () => {
       onLine: (line) => {
         const hasProducts = line.status === 'success' && line.products.length > 0;
         if (hasProducts) {
+          // Sanitize every URL BEFORE it enters the aggregate state — strips
+          // tracking/session params, forces https, and canonicalizes Amazon
+          // links to /dp/ASIN so Universal Links open the native app.
+          const sanitized = line.products.map(p => ({ ...p, url: sanitizeUrl(p.url) }));
           // Append, then re-group + re-sort the entire aggregate.
-          allProductsRef.current = [...allProductsRef.current, ...line.products];
+          allProductsRef.current = [...allProductsRef.current, ...sanitized];
           const grouped = groupProducts(allProductsRef.current);
           setProducts(grouped);
           const allPrices = grouped.flatMap(p => p.offers.map(o => o.price));
