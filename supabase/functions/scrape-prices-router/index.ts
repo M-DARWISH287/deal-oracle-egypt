@@ -20,19 +20,22 @@ export interface Product {
 type StoreStrategy = 'NATIVE' | 'FIRECRAWL' | 'SKIP';
 
 const ROUTING_MATRIX: Record<string, StoreStrategy> = {
-  // Tier 1 & 2 — Native fetch viable
-  'Raya Shop':       'NATIVE',
-  'Tradeline':       'NATIVE',
-  'Carrefour Egypt': 'NATIVE',
-  'El Shennawy':     'NATIVE',
+  // Tier 1 — Native fetch viable & verified against live DOM
+  'El Shennawy': 'NATIVE', // OpenCart, full SSR, /index.php?route=product/search
 
-  // Tier 3 — Firecrawl required (WAF / SPA shell)
+  // Tier 2 — SPA shells (no SSR product data) → Firecrawl required
+  // Verified empirically: returns HTTP 200 but no products in HTML.
+  'Raya Shop':       'FIRECRAWL', // Nuxt SPA — only marketing text in SSR
+  'Tradeline':       'FIRECRAWL', // Angular SPA — search results lazy-loaded
+  'Carrefour Egypt': 'FIRECRAWL', // Cloudflare JS challenge → 53-byte sentinel
+
+  // Tier 3 — WAF / blocked native
   'Amazon Egypt': 'FIRECRAWL',
   'Jumia':        'FIRECRAWL',
   '2B Egypt':     'FIRECRAWL',
   'Cairo Sales':  'FIRECRAWL',
 
-  // Tier 4 & 5 — Dropped or pending fix
+  // Tier 4 — Dropped or pending fix
   'Dream 2000':  'SKIP',
   'Dubai Phone': 'SKIP',
   'Noon':        'SKIP',
@@ -127,110 +130,44 @@ async function fetchHtml(url: string): Promise<string | null> {
   }
 }
 
-// ---------- Per-store parsers ----------
+// ---------- Per-store parsers (REALITY-BASED) ----------
+//
+// Each parser was authored against a live HTML sample of the store's search
+// page (query="iPhone 15"). We DO NOT hallucinate — if the live page does not
+// contain SSR product data, the parser returns []. Sites that proved to be
+// SPA-shells (Raya/Tradeline/Carrefour) were moved to FIRECRAWL and are no
+// longer dispatched through this NATIVE path.
 
-// Raya Shop — Magento 2 (.product-item-link, .price)
-function parseRayaShop(html: string): Product[] {
+// El Shennawy — OpenCart 3 storefront
+// Live DOM: each result is wrapped in <div class="product-thumb"> and
+// contains <h4><a href="...product_id=NNN...">NAME</a></h4> and
+// <p class="price"><span class="price-new">PRICE EGP</span>...</p>.
+function parseElShennawy(html: string): Product[] {
   const products: Product[] = [];
+  // Split per product-thumb so we don't cross-match between cards.
   const cardRe =
-    /<li[^>]+class="[^"]*\bproduct-item\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+    /<div[^>]+class="[^"]*\bproduct-thumb\b[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*\bproduct-thumb\b|<\/section|<footer|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = cardRe.exec(html)) !== null && products.length < 25) {
     const card = m[1];
+    // Skip "category-content" cards (homepage carousels in the search page header).
+    if (/class="[^"]*\bcategory-content\b/i.test(card)) continue;
+
     const linkM = card.match(
-      /<a[^>]+class="[^"]*product-item-link[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i,
+      /<h4[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h4>/i,
     );
+    if (!linkM) continue;
+
+    // Prefer .price-new (sale price), fall back to first numeric inside .price.
     const priceM =
-      card.match(/<span[^>]+data-price-amount="([\d.]+)"/i) ??
-      card.match(/<span[^>]+class="[^"]*\bprice\b[^"]*"[^>]*>([\s\S]*?)<\/span>/i);
-    if (!linkM || !priceM) continue;
+      card.match(/<span[^>]+class="[^"]*\bprice-new\b[^"]*"[^>]*>([\s\S]*?)<\/span>/i) ??
+      card.match(/<p[^>]+class="[^"]*\bprice\b[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+    if (!priceM) continue;
+
     const name = stripTags(linkM[2]);
-    const price = cleanPrice(priceM[1]);
-    const url = absolutize(linkM[1], 'https://rayashop.com');
-    products.push({ name, price, url, store: 'Raya Shop' });
-  }
-  return products;
-}
-
-// Tradeline — Shopify (a.product-card / h3 / .price)
-function parseTradeline(html: string): Product[] {
-  const products: Product[] = [];
-  // Shopify product cards typically wrap each item in a div/li with a product link to /products/<handle>
-  const cardRe =
-    /<a[^>]+href="(\/products\/[^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]{0,1500}?)(?:<\/li>|<\/div>\s*<\/div>)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = cardRe.exec(html)) !== null && products.length < 25) {
-    const href = m[1];
-    const titleBlock = m[2];
-    const after = m[3];
-    const titleText = stripTags(titleBlock);
-    if (!titleText || titleText.length < 4) continue;
-    const priceM =
-      after.match(/<span[^>]+class="[^"]*\bprice[^"]*"[^>]*>([\s\S]*?)<\/span>/i) ??
-      after.match(/data-product-price[^>]*>([\s\S]*?)</i) ??
-      after.match(/EGP[\s\S]{0,40}?([\d.,]+)/i) ??
-      after.match(/([\d.,]+)\s*(?:EGP|LE)/i);
-    if (!priceM) continue;
-    const price = cleanPrice(priceM[1]);
-    const url = absolutize(href, 'https://tradelinestores.com');
-    products.push({ name: titleText, price, url, store: 'Tradeline' });
-  }
-  return products;
-}
-
-// Carrefour Egypt — Next.js, products embedded in __NEXT_DATA__
-function parseCarrefour(html: string): Product[] {
-  const m = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
-  if (!m) return [];
-  let json: unknown;
-  try { json = JSON.parse(m[1]); } catch { return []; }
-  const out: Product[] = [];
-  const seen = new Set<string>();
-  const queue: unknown[] = [json];
-  while (queue.length && out.length < 25) {
-    const node = queue.shift();
-    if (!node || typeof node !== 'object') continue;
-    if (Array.isArray(node)) { queue.push(...node); continue; }
-    const n = node as Record<string, unknown>;
-    const name = (n.name ?? n.title) as string | undefined;
-    const priceObj = (n.price ?? n.prices) as Record<string, unknown> | number | undefined;
-    const link = (n.url ?? n.link) as string | undefined;
-    if (typeof name === 'string' && (priceObj !== undefined) && typeof link === 'string') {
-      let price = 0;
-      if (typeof priceObj === 'number') price = Math.round(priceObj);
-      else if (typeof priceObj === 'object' && priceObj) {
-        const pv = (priceObj as Record<string, unknown>).price ?? (priceObj as Record<string, unknown>).value;
-        price = cleanPrice(String(pv ?? ''));
-      }
-      const url = absolutize(link, 'https://www.carrefouregypt.com');
-      if (name && price && !seen.has(url)) {
-        seen.add(url);
-        out.push({ name: name.trim(), price, url, store: 'Carrefour Egypt' });
-      }
-    }
-    for (const k of Object.keys(n)) queue.push(n[k]);
-  }
-  return out;
-}
-
-// El Shennawy — Shopify variant
-function parseElShennawy(html: string): Product[] {
-  const products: Product[] = [];
-  const cardRe =
-    /<a[^>]+href="(\/products\/[^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]{0,1500}?)(?:<\/li>|<\/div>\s*<\/div>)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = cardRe.exec(html)) !== null && products.length < 25) {
-    const href = m[1];
-    const name = stripTags(m[2]);
-    const after = m[3];
-    if (!name || name.length < 4) continue;
-    const priceM =
-      after.match(/<span[^>]+class="[^"]*\bprice[^"]*"[^>]*>([\s\S]*?)<\/span>/i) ??
-      after.match(/EGP[\s\S]{0,40}?([\d.,]+)/i) ??
-      after.match(/([\d.,]+)\s*(?:EGP|LE)/i);
-    if (!priceM) continue;
-    const price = cleanPrice(priceM[1]);
-    const url = absolutize(href, 'https://elshennawy.com');
+    const price = cleanPrice(stripTags(priceM[1]));
+    const url = decodeEntities(linkM[1]); // Shennawy emits absolute URLs already
+    if (!name || price <= 0) continue;
     products.push({ name, price, url, store: 'El Shennawy' });
   }
   return products;
@@ -242,22 +179,11 @@ async function scrapeNative(store: string, query: string): Promise<Product[]> {
   const q = encodeURIComponent(query);
   try {
     switch (store) {
-      case 'Raya Shop': {
-        const html = await fetchHtml(`https://rayashop.com/en/catalogsearch/result/?q=${q}`);
-        return html ? finalize(parseRayaShop(html)) : [];
-      }
-      case 'Tradeline': {
-        const html = await fetchHtml(`https://tradelinestores.com/search?q=${q}`);
-        return html ? finalize(parseTradeline(html)) : [];
-      }
-      case 'Carrefour Egypt': {
-        const html = await fetchHtml(
-          `https://www.carrefouregypt.com/mafegy/en/search?keyword=${q}`,
-        );
-        return html ? finalize(parseCarrefour(html)) : [];
-      }
       case 'El Shennawy': {
-        const html = await fetchHtml(`https://elshennawy.com/search?q=${q}`);
+        // OpenCart search route (verified live). Wrong path returns the homepage.
+        const html = await fetchHtml(
+          `https://www.elshennawy.com/index.php?route=product/search&search=${q}`,
+        );
         return html ? finalize(parseElShennawy(html)) : [];
       }
       default:
