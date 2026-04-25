@@ -42,9 +42,14 @@ const ROUTING_MATRIX: Record<string, StoreStrategy> = {
   'B.TECH':      'SKIP',
 };
 
-const GLOBAL_TIMEOUT_MS = 8_000;
+// Two-tier timeouts: native fetches stay snappy; Firecrawl JSON-extract
+// (LLM-backed, heavier) gets its own larger budget.
+const NATIVE_TIMEOUT_MS    =  8_000;
+const FIRECRAWL_TIMEOUT_MS = 30_000;
 const FIRECRAWL_V2 = 'https://api.firecrawl.dev/v2';
-const FIRECRAWL_TIMEOUT_MS = 7_000; // stays under GLOBAL_TIMEOUT_MS
+// Firecrawl-side timeout (ms): leave ~2s of headroom under FIRECRAWL_TIMEOUT_MS
+// so AbortController doesn't fire before Firecrawl can respond with an error.
+const FIRECRAWL_API_TIMEOUT_MS = 28_000;
 
 // Per-store search URLs used by Firecrawl. Mirrors the routing matrix; any
 // store routed to FIRECRAWL must have an entry here or it returns [].
@@ -341,7 +346,7 @@ async function scrapeFirecrawl(store: string, query: string): Promise<Product[]>
           },
         ],
         onlyMainContent: true,
-        timeout: FIRECRAWL_TIMEOUT_MS,
+        timeout: FIRECRAWL_API_TIMEOUT_MS,
       }),
     });
 
