@@ -179,22 +179,11 @@ async function scrapeNative(store: string, query: string): Promise<Product[]> {
   const q = encodeURIComponent(query);
   try {
     switch (store) {
-      case 'Raya Shop': {
-        const html = await fetchHtml(`https://rayashop.com/en/catalogsearch/result/?q=${q}`);
-        return html ? finalize(parseRayaShop(html)) : [];
-      }
-      case 'Tradeline': {
-        const html = await fetchHtml(`https://tradelinestores.com/search?q=${q}`);
-        return html ? finalize(parseTradeline(html)) : [];
-      }
-      case 'Carrefour Egypt': {
-        const html = await fetchHtml(
-          `https://www.carrefouregypt.com/mafegy/en/search?keyword=${q}`,
-        );
-        return html ? finalize(parseCarrefour(html)) : [];
-      }
       case 'El Shennawy': {
-        const html = await fetchHtml(`https://elshennawy.com/search?q=${q}`);
+        // OpenCart search route (verified live). Wrong path returns the homepage.
+        const html = await fetchHtml(
+          `https://www.elshennawy.com/index.php?route=product/search&search=${q}`,
+        );
         return html ? finalize(parseElShennawy(html)) : [];
       }
       default:
