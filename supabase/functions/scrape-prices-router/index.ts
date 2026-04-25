@@ -43,6 +43,20 @@ const ROUTING_MATRIX: Record<string, StoreStrategy> = {
 };
 
 const GLOBAL_TIMEOUT_MS = 8_000;
+const FIRECRAWL_V2 = 'https://api.firecrawl.dev/v2';
+const FIRECRAWL_TIMEOUT_MS = 7_000; // stays under GLOBAL_TIMEOUT_MS
+
+// Per-store search URLs used by Firecrawl. Mirrors the routing matrix; any
+// store routed to FIRECRAWL must have an entry here or it returns [].
+const FIRECRAWL_SEARCH_URLS: Record<string, (q: string) => string> = {
+  'Raya Shop':       (q) => `https://rayashop.com/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,
+  'Tradeline':       (q) => `https://tradelinestores.com/search?q=${encodeURIComponent(q)}`,
+  'Carrefour Egypt': (q) => `https://www.carrefouregypt.com/mafegy/en/search?keyword=${encodeURIComponent(q)}`,
+  'Amazon Egypt':    (q) => `https://www.amazon.eg/s?k=${encodeURIComponent(q)}`,
+  'Jumia':           (q) => `https://www.jumia.com.eg/catalog/?q=${encodeURIComponent(q)}`,
+  '2B Egypt':        (q) => `https://2b.com.eg/en/catalogsearch/result/?q=${encodeURIComponent(q)}`,
+  'Cairo Sales':     (q) => `https://cairosales.com/?s=${encodeURIComponent(q)}&post_type=product`,
+};
 
 // ---------- Browser headers (realistic Chrome/Win) ----------
 const BROWSER_HEADERS: Record<string, string> = {
@@ -196,9 +210,188 @@ async function scrapeNative(store: string, query: string): Promise<Product[]> {
   }
 }
 
+// ---------- Firecrawl (strict JSON schema + validation layer) ----------
+//
+// We extract via `formats: ["json"]` with a strict schema so the LLM cannot
+// invent fields. The prompt forbids homepage / category / search URLs, and a
+// post-validation layer rejects anything that slips through (missing URL,
+// domain-root URL, or shallow paths). Any product whose URL fails validation
+// is dropped — we never patch or guess URLs.
+
+const FIRECRAWL_SCHEMA = {
+  type: 'object',
+  properties: {
+    products: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name:  { type: 'string' },
+          price: { type: 'number' },
+          url:   { type: 'string' },
+        },
+        required: ['name', 'price', 'url'],
+      },
+    },
+  },
+  required: ['products'],
+} as const;
+
+function buildFirecrawlPrompt(store: string, query: string): string {
+  return [
+    `Extract the product listings for the search query "${query}" from this ${store} search results page.`,
+    '',
+    'For EACH product return: name (string), price (number, EGP, no currency symbol, no commas), url (string).',
+    '',
+    'STRICT URL RULES — failing ANY rule means you MUST OMIT that product entirely:',
+    '1. The url MUST be ABSOLUTE and start with "https://".',
+    '2. The url MUST be the DIRECT product detail page (deep link to that specific product).',
+    '3. DO NOT return the homepage, a category page, a search results URL, a tracking redirect, or the storefront root.',
+    '4. DO NOT invent, guess, complete, or normalize URLs. If the exact product URL is not present in the page, OMIT the product.',
+    '5. The url MUST contain a product-specific path segment (e.g. a slug, SKU, or product id) — not just the domain.',
+    '',
+    'Return ONLY products where name, price, AND a valid deep-link url are all present. Do not pad results.',
+  ].join('\n');
+}
+
+function isValidProductUrl(rawUrl: unknown, searchPageUrl: string): boolean {
+  if (typeof rawUrl !== 'string') return false;
+  const url = rawUrl.trim();
+  if (!url) return false;
+
+  let parsed: URL;
+  let searchParsed: URL;
+  try {
+    parsed = new URL(url);
+    searchParsed = new URL(searchPageUrl);
+  } catch {
+    return false;
+  }
+
+  // Must be https (rule 1).
+  if (parsed.protocol !== 'https:') return false;
+
+  // Must live on the same registrable host as the store we asked about —
+  // blocks LLM hallucinations pointing at amazon.com / google.com / etc.
+  if (parsed.hostname.replace(/^www\./, '') !==
+      searchParsed.hostname.replace(/^www\./, '')) {
+    return false;
+  }
+
+  // Reject domain-root / homepage.
+  const path = parsed.pathname.replace(/\/+$/, '');
+  if (path === '' || path === '/') return false;
+
+  // Reject obvious search / category listing URLs.
+  const lowerPath = path.toLowerCase();
+  const lowerSearch = parsed.search.toLowerCase();
+  const SEARCH_MARKERS = [
+    '/search', '/catalogsearch', '/catalog/', '/category/', '/c/',
+    '/s?', '/s/', '/results',
+  ];
+  if (SEARCH_MARKERS.some((m) => lowerPath.includes(m) || lowerSearch.includes(m))) {
+    // Allow Amazon /dp/ and Jumia .html product pages even if path mentions /catalog
+    if (!/\/(dp|gp\/product|product)\//.test(lowerPath) && !/\.html?$/.test(lowerPath)) {
+      return false;
+    }
+  }
+
+  // Heuristic depth check: require at least one slug-like segment beyond root.
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length < 1) return false;
+  const hasSlugLike = segments.some((s) => s.length >= 4 && /[a-z0-9]/i.test(s));
+  if (!hasSlugLike) return false;
+
+  return true;
+}
+
 async function scrapeFirecrawl(store: string, query: string): Promise<Product[]> {
   console.log(`[ROUTER] 🔥 FIRECRAWL ${store}  q="${query}"`);
-  return [];
+
+  const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
+  if (!apiKey) {
+    console.error('[FIRECRAWL] FIRECRAWL_API_KEY not configured');
+    return [];
+  }
+  const buildUrl = FIRECRAWL_SEARCH_URLS[store];
+  if (!buildUrl) {
+    console.log(`[FIRECRAWL] No search URL mapped for store: ${store}`);
+    return [];
+  }
+
+  const searchPageUrl = buildUrl(query);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('timeout'), FIRECRAWL_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${FIRECRAWL_V2}/scrape`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: searchPageUrl,
+        formats: [
+          {
+            type: 'json',
+            schema: FIRECRAWL_SCHEMA,
+            prompt: buildFirecrawlPrompt(store, query),
+          },
+        ],
+        onlyMainContent: true,
+        timeout: FIRECRAWL_TIMEOUT_MS,
+      }),
+    });
+
+    if (!res.ok) {
+      console.error(`[FIRECRAWL] ${store} HTTP ${res.status}`);
+      return [];
+    }
+
+    const payload = await res.json().catch(() => null);
+    // Firecrawl v2 puts extracted JSON under data.json (REST shape).
+    const json =
+      payload?.data?.json ??
+      payload?.json ??
+      payload?.data?.extract ??
+      null;
+    const rawProducts: unknown[] = Array.isArray(json?.products) ? json.products : [];
+
+    const validated: Product[] = [];
+    let dropped = 0;
+    for (const item of rawProducts) {
+      if (!item || typeof item !== 'object') { dropped++; continue; }
+      const r = item as Record<string, unknown>;
+      const name = typeof r.name === 'string' ? r.name.trim() : '';
+      const priceNum =
+        typeof r.price === 'number' ? r.price :
+        typeof r.price === 'string' ? cleanPrice(r.price) : 0;
+      const url = typeof r.url === 'string' ? r.url.trim() : '';
+
+      if (!name || priceNum <= 100) { dropped++; continue; }
+      if (!isValidProductUrl(url, searchPageUrl)) {
+        dropped++;
+        continue;
+      }
+      validated.push({ name, price: Math.round(priceNum), url, store });
+    }
+
+    const final = finalize(validated);
+    console.log(
+      `[FIRECRAWL] ${store} extracted=${rawProducts.length} ` +
+      `dropped=${dropped} valid=${final.length}`,
+    );
+    // Per spec: minimum success = 2 valid products. Below that, return [].
+    return final.length >= 2 ? final : [];
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[FIRECRAWL] ${store} error: ${msg}`);
+    return [];
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ---------- Timeout wrapper ----------
