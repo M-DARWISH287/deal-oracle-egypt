@@ -517,6 +517,7 @@ Deno.serve(async (req: Request) => {
   try {
     const body = await req.json().catch(() => ({}));
     const query = typeof body?.query === 'string' ? body.query.trim() : '';
+    const forceRefresh = body?.force_refresh === true;
     if (!query) {
       return new Response(
         JSON.stringify({ error: 'Search query is required' }),
@@ -525,6 +526,40 @@ Deno.serve(async (req: Request) => {
     }
 
     console.log(`\n🚀 ROUTER SEARCH: "${query}"`);
+    const cacheKey = normalizeCacheKey(query);
+    console.log(`[CACHE] key="${cacheKey}" forceRefresh=${forceRefresh}`);
+
+    // ---------- Cache hit → replay as NDJSON ----------
+    if (!forceRefresh) {
+      const cached = await readCache(cacheKey);
+      if (cached && cached.length > 0) {
+        console.log(`[CACHE] ✅ HIT — replaying ${cached.length} store entries`);
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const entry of cached) {
+              const line =
+                JSON.stringify({ ...entry, cached: true }) + '\n';
+              controller.enqueue(encoder.encode(line));
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/x-ndjson; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no',
+            'X-Cache': 'HIT',
+          },
+        });
+      }
+      console.log('[CACHE] ⛔ MISS — running live scrape');
+    } else {
+      console.log('[CACHE] 🔁 BYPASS (force_refresh=true) — running live scrape');
+    }
 
     // ---------- NDJSON streaming response ----------
     // Each store emits exactly one line (`{store, strategy, status, products|error}\n`)
@@ -535,6 +570,8 @@ Deno.serve(async (req: Request) => {
       start(controller) {
         const tasks: Promise<unknown>[] = [];
         const t0 = Date.now();
+        // Aggregate successful stores so we can persist after the stream closes.
+        const aggregated: CachedStoreEntry[] = [];
 
         for (const [store, strategy] of Object.entries(ROUTING_MATRIX)) {
           if (strategy === 'SKIP') {
@@ -548,6 +585,19 @@ Deno.serve(async (req: Request) => {
             .then((products) => {
               const latencyMs = Date.now() - t0;
               console.log(`[ROUTER] ✅ ${store} → ${products.length} in ${latencyMs}ms`);
+              // Cache only stores that returned at least one valid product —
+              // empty successes still count as "ran cleanly" but aren't worth
+              // locking in for 6h.
+              if (products.length > 0) {
+                aggregated.push({
+                  store,
+                  strategy,
+                  status: 'success',
+                  count: products.length,
+                  latencyMs,
+                  products,
+                });
+              }
               const line =
                 JSON.stringify({
                   store,
@@ -582,6 +632,10 @@ Deno.serve(async (req: Request) => {
         Promise.allSettled(tasks).then(() => {
           console.log(`[ROUTER] 🏁 stream closed in ${Date.now() - t0}ms`);
           controller.close();
+          // Fire-and-forget cache write — never blocks the response.
+          writeCache(cacheKey, aggregated).catch((err) =>
+            console.log(`[CACHE] async write failed: ${err}`),
+          );
         });
       },
     });
@@ -593,6 +647,7 @@ Deno.serve(async (req: Request) => {
         'Content-Type': 'application/x-ndjson; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'X-Accel-Buffering': 'no',
+        'X-Cache': 'MISS',
       },
     });
   } catch (err) {
