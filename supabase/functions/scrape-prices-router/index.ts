@@ -429,49 +429,75 @@ Deno.serve(async (req: Request) => {
 
     console.log(`\n🚀 ROUTER SEARCH: "${query}"`);
 
-    type Task = { store: string; strategy: StoreStrategy; promise: Promise<Product[]> };
-    const tasks: Task[] = [];
+    // ---------- NDJSON streaming response ----------
+    // Each store emits exactly one line (`{store, strategy, status, products|error}\n`)
+    // the instant its scrape resolves — clients render as results arrive instead of
+    // waiting for the slowest Firecrawl call (~30s) to finish.
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const tasks: Promise<unknown>[] = [];
+        const t0 = Date.now();
 
-    for (const [store, strategy] of Object.entries(ROUTING_MATRIX)) {
-      if (strategy === 'SKIP') {
-        console.log(`[ROUTER] 🚫 SKIP    ${store}`);
-        continue;
-      }
-      const fn = strategy === 'NATIVE' ? scrapeNative : scrapeFirecrawl;
-      const cap = strategy === 'NATIVE' ? NATIVE_TIMEOUT_MS : FIRECRAWL_TIMEOUT_MS;
-      tasks.push({
-        store,
-        strategy,
-        promise: withTimeout(fn(store, query), cap, store),
-      });
-    }
+        for (const [store, strategy] of Object.entries(ROUTING_MATRIX)) {
+          if (strategy === 'SKIP') {
+            console.log(`[ROUTER] 🚫 SKIP    ${store}`);
+            continue;
+          }
+          const fn = strategy === 'NATIVE' ? scrapeNative : scrapeFirecrawl;
+          const cap = strategy === 'NATIVE' ? NATIVE_TIMEOUT_MS : FIRECRAWL_TIMEOUT_MS;
 
-    const settled = await Promise.allSettled(tasks.map((t) => t.promise));
+          const task = withTimeout(fn(store, query), cap, store)
+            .then((products) => {
+              const latencyMs = Date.now() - t0;
+              console.log(`[ROUTER] ✅ ${store} → ${products.length} in ${latencyMs}ms`);
+              const line =
+                JSON.stringify({
+                  store,
+                  strategy,
+                  status: 'success',
+                  count: products.length,
+                  latencyMs,
+                  products,
+                }) + '\n';
+              controller.enqueue(encoder.encode(line));
+            })
+            .catch((err) => {
+              const latencyMs = Date.now() - t0;
+              const error = err instanceof Error ? err.message : String(err);
+              console.error(`[ROUTER] ❌ ${store}: ${error}`);
+              const line =
+                JSON.stringify({
+                  store,
+                  strategy,
+                  status: 'error',
+                  count: 0,
+                  latencyMs,
+                  error,
+                }) + '\n';
+              controller.enqueue(encoder.encode(line));
+            });
 
-    const allProducts: Product[] = [];
-    const perStore = settled.map((res, i) => {
-      const { store, strategy } = tasks[i];
-      if (res.status === 'fulfilled') {
-        allProducts.push(...res.value);
-        return { store, strategy, status: 'ok', count: res.value.length };
-      }
-      const error = res.reason instanceof Error ? res.reason.message : String(res.reason);
-      console.error(`[ROUTER] ❌ ${store}: ${error}`);
-      return { store, strategy, status: 'error', count: 0, error };
+          tasks.push(task);
+        }
+
+        // Close the stream once every store has reported (success, error, or timeout).
+        Promise.allSettled(tasks).then(() => {
+          console.log(`[ROUTER] 🏁 stream closed in ${Date.now() - t0}ms`);
+          controller.close();
+        });
+      },
     });
 
-    allProducts.sort((a, b) => a.price - b.price);
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        query,
-        count: allProducts.length,
-        perStore,
-        products: allProducts,
-      }, null, 2),
-      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
-    );
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
+      },
+    });
   } catch (err) {
     return new Response(
       JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' }),
