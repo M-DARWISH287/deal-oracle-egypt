@@ -248,6 +248,8 @@ function buildFirecrawlPrompt(store: string, query: string): string {
     '',
     'For EACH product return: name (string), price (number, EGP, no currency symbol, no commas), url (string).',
     '',
+    `CRITICAL: You must ONLY extract the actual smartphone or main product requested ("${query}"). You MUST STRICTLY EXCLUDE all accessories, cases, covers, screen protectors, tempered glass, cables, chargers, adapters, earphones, headsets, straps, bands, pouches, sleeves, holders, or spare parts. If the exact main product is not found on this page, return an empty array [].`,
+    '',
     'STRICT URL RULES — failing ANY rule means you MUST OMIT that product entirely:',
     '1. The url MUST be ABSOLUTE and start with "https://".',
     '2. The url MUST be the DIRECT product detail page (deep link to that specific product).',
@@ -255,7 +257,7 @@ function buildFirecrawlPrompt(store: string, query: string): string {
     '4. DO NOT invent, guess, complete, or normalize URLs. If the exact product URL is not present in the page, OMIT the product.',
     '5. The url MUST contain a product-specific path segment (e.g. a slug, SKU, or product id) — not just the domain.',
     '',
-    'Return ONLY products where name, price, AND a valid deep-link url are all present. Do not pad results.',
+    'Return ONLY products where name, price, AND a valid deep-link url are all present, AND the product is the actual main item (not an accessory). Do not pad results.',
   ].join('\n');
 }
 

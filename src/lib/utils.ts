@@ -34,7 +34,14 @@ const TRACKING_PARAMS = new Set<string>([
   'tracker_id', 'click_id', 'sub_id', 'partner', 'partner_id',
 ]);
 
+// Match an ASIN sitting after /dp/ or /product/ — Amazon embeds tracking
+// segments AFTER the ASIN (e.g. `/dp/B0CQXYZ/ref=sr_1_1`) so we anchor on
+// the marker and accept any trailing path/query.
 const AMAZON_ASIN_RE = /\/(?:dp|gp\/product|gp\/aw\/d|product)\/([A-Z0-9]{10})(?:[/?]|$)/i;
+// Strips path-embedded tracking like `/ref=sr_1_1`, `/ref=cm_sw_r_…` from
+// any URL pathname. Amazon (and a few others) hide trackers in the path,
+// not the query string.
+const PATH_REF_RE = /\/ref=[^/?#]*/gi;
 
 export function sanitizeUrl(rawUrl: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
@@ -64,12 +71,18 @@ export function sanitizeUrl(rawUrl: string): string {
     if (host.includes('amazon.')) {
       const asinMatch = url.pathname.match(AMAZON_ASIN_RE);
       if (asinMatch?.[1]) {
-        const tld = host.replace(/^www\./, '').replace(/^smile\./, '');
-        url.hostname = `www.${tld}`;
-        url.pathname = `/dp/${asinMatch[1].toUpperCase()}`;
-        url.search = ''; // ASIN form needs no query params
-        url.hash = '';
+        // Force the canonical Egyptian Amazon storefront on /dp/ASIN.
+        // Anything else (locale prefixes like /-/en/, slugs, /ref=… tails)
+        // is discarded — this is the form that reliably triggers the
+        // native Amazon app via Universal Links on iOS/Android.
+        return `https://www.amazon.eg/dp/${asinMatch[1].toUpperCase()}`;
       }
+      // No ASIN parseable — at least scrub /ref=… from the path so we
+      // don't leak session trackers.
+      url.pathname = url.pathname.replace(PATH_REF_RE, '');
+    } else {
+      // Generic fallback: strip /ref=… path segments on any host.
+      url.pathname = url.pathname.replace(PATH_REF_RE, '');
     }
 
     // Drop a dangling "?" if all params were stripped.
