@@ -19,6 +19,101 @@ export interface Product {
 
 type StoreStrategy = 'NATIVE' | 'FIRECRAWL' | 'SKIP';
 
+// ---------- Cache config ----------
+// Postgres `search_cache` table (already provisioned): query TEXT, results JSONB,
+// expires_at TIMESTAMPTZ. We store an array of per-store success entries —
+// each entry mirrors the NDJSON line we'd otherwise stream live. On cache hit
+// we replay those entries as NDJSON so the frontend contract is unchanged.
+const CACHE_TTL_HOURS = 6;
+
+interface CachedStoreEntry {
+  store: string;
+  strategy: StoreStrategy;
+  status: 'success';
+  count: number;
+  latencyMs: number;
+  products: Product[];
+}
+
+function normalizeCacheKey(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+async function readCache(key: string): Promise<CachedStoreEntry[] | null> {
+  const url = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !serviceKey) return null;
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/search_cache?query=eq.${encodeURIComponent(key)}` +
+        `&expires_at=gt.${encodeURIComponent(new Date().toISOString())}` +
+        `&select=results,expires_at&limit=1`,
+      {
+        headers: {
+          apikey: serviceKey,
+          Authorization: `Bearer ${serviceKey}`,
+        },
+      },
+    );
+    if (!res.ok) {
+      console.log(`[CACHE] read HTTP ${res.status}`);
+      return null;
+    }
+    const rows = (await res.json()) as Array<{ results: unknown }>;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const results = rows[0].results;
+    if (!Array.isArray(results) || results.length === 0) return null;
+    return results as CachedStoreEntry[];
+  } catch (err) {
+    console.log(`[CACHE] read error: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+async function writeCache(key: string, entries: CachedStoreEntry[]): Promise<void> {
+  if (entries.length === 0) {
+    console.log('[CACHE] skip write — zero successful stores (no poisoning)');
+    return;
+  }
+  const url = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !serviceKey) return;
+  try {
+    const expiresAt = new Date(
+      Date.now() + CACHE_TTL_HOURS * 60 * 60 * 1000,
+    ).toISOString();
+    // Upsert on `query` — requires a unique constraint on search_cache.query.
+    // If absent, this falls back to insert and the `on_conflict` is ignored.
+    const res = await fetch(
+      `${url}/rest/v1/search_cache?on_conflict=query`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: serviceKey,
+          Authorization: `Bearer ${serviceKey}`,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify({
+          query: key,
+          results: entries,
+          expires_at: expiresAt,
+        }),
+      },
+    );
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.log(`[CACHE] write HTTP ${res.status} — ${txt.slice(0, 200)}`);
+    } else {
+      console.log(
+        `[CACHE] ✍️  wrote ${entries.length} store entries, ttl=${CACHE_TTL_HOURS}h`,
+      );
+    }
+  } catch (err) {
+    console.log(`[CACHE] write error: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 const ROUTING_MATRIX: Record<string, StoreStrategy> = {
   // Tier 1 — Native fetch viable & verified against live DOM
   'El Shennawy': 'NATIVE', // OpenCart, full SSR, /index.php?route=product/search
